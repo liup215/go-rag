@@ -65,7 +65,10 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: go-rag-${{ matrix.target }}-binary
-        path: go-rag-${GOOS}-${GOARCH}*
+        path: |
+          go-rag-linux-*
+          go-rag-darwin-*
+          go-rag-windows-*.exe
 
     - name: Upload artifact (archive)
       uses: actions/upload-artifact@v4
