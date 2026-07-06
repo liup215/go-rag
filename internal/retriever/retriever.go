@@ -33,9 +33,10 @@ func (r *Retriever) SetThreshold(threshold float64) {
 
 // SearchOptions contains search parameters.
 type SearchOptions struct {
-	Query     string
-	TopK      int
-	Threshold float64
+	Query      string
+	TopK       int
+	Threshold  float64
+	DocumentID string
 }
 
 // Search performs hybrid search (vector + keyword fallback).
@@ -95,6 +96,9 @@ func (r *Retriever) vectorSearch(ctx context.Context, opts SearchOptions) ([]sto
 		if len(chunk.Embedding) == 0 || len(chunk.Embedding) != len(queryVec) {
 			continue
 		}
+		if opts.DocumentID != "" && chunk.DocumentID != opts.DocumentID {
+			continue
+		}
 
 		score := cosineSimilarity(queryVec, chunk.Embedding)
 		if score >= opts.Threshold {
@@ -126,13 +130,21 @@ func (r *Retriever) vectorSearch(ctx context.Context, opts SearchOptions) ([]sto
 
 // keywordSearch performs keyword-based search using FTS5.
 func (r *Retriever) keywordSearch(opts SearchOptions) ([]storage.SearchResult, error) {
-	// Get more results than needed for better coverage
-	limit := opts.TopK * 3
-	if limit < 20 {
-		limit = 20
-	}
+	var chunks []storage.Chunk
+	var err error
 
-	chunks, err := r.storage.SearchByKeyword(opts.Query, limit)
+	if opts.DocumentID != "" {
+		// When scoped to a document, score all chunks of that document
+		// instead of relying on a global keyword limit that may exclude it.
+		chunks, err = r.storage.GetChunksByDocument(opts.DocumentID)
+	} else {
+		// Get more results than needed for better coverage
+		limit := opts.TopK * 3
+		if limit < 20 {
+			limit = 20
+		}
+		chunks, err = r.storage.SearchByKeyword(opts.Query, limit)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("keyword search failed: %w", err)
 	}
@@ -147,6 +159,9 @@ func (r *Retriever) keywordSearch(opts SearchOptions) ([]storage.SearchResult, e
 
 	var scored []scoredChunk
 	for _, chunk := range chunks {
+		if opts.DocumentID != "" && chunk.DocumentID != opts.DocumentID {
+			continue
+		}
 		score := keywordScore(chunk.Text, queryTokens)
 		if score >= opts.Threshold {
 			scored = append(scored, scoredChunk{chunk: chunk, score: score})
