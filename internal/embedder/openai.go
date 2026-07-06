@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -137,10 +138,18 @@ func (e *OpenAIEmbedder) embedBatch(ctx context.Context, texts []string) ([][]fl
 	}
 
 	url := e.BaseURL
-	if !hasSuffix(url, "/v1") && !contains(url, "/v1/") {
-		url += "/v1"
+	// If URL already ends with /embeddings, use it as-is (user provided full path)
+	if hasSuffix(url, "/embeddings") {
+		// Use as-is
+	} else if hasSuffix(url, "/v1") {
+		url += "/embeddings"
+	} else if contains(url, "/v1/") {
+		// URL contains /v1/ somewhere, assume it's a custom path
+		url += "/embeddings"
+	} else {
+		// No /v1 in URL, add standard OpenAI path
+		url = strings.TrimSuffix(url, "/") + "/v1/embeddings"
 	}
-	url += "/embeddings"
 
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
 	if err != nil {
