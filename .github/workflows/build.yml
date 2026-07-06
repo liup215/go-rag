@@ -1,0 +1,51 @@
+name: Build
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        arch: [amd64, arm64]
+        exclude:
+          # GitHub Actions doesn't provide arm64 runners for Windows
+          - os: windows-latest
+            arch: arm64
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.21'
+
+    - name: Get dependencies
+      run: go mod download
+
+    - name: Build
+      env:
+        GOOS: ${{ runner.os == 'Windows' && 'windows' || runner.os == 'macOS' && 'darwin' || 'linux' }}
+        GOARCH: ${{ matrix.arch }}
+      run: |
+        output="go-rag-${{ env.GOOS }}-${{ matrix.arch }}"
+        if [ "${{ env.GOOS }}" = "windows" ]; then
+          output="${output}.exe"
+        fi
+        go build -ldflags="-s -w -X main.version=$(git describe --tags --always --dirty)" -o "${output}" ./cmd/go-rag
+      shell: bash
+
+    - name: Test
+      run: go test -v ./...
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: go-rag-${{ env.GOOS }}-${{ matrix.arch }}
+        path: go-rag-*
