@@ -52,14 +52,25 @@ jobs:
           output="${output}.exe"
         fi
         go build -ldflags="-s -w -X main.version=${version}" -o "${output}" ./cmd/go-rag
-
-        # Create archive
-        if [ "${GOOS}" = "windows" ]; then
-          zip "go-rag-${version}-${GOOS}-${GOARCH}.zip" "${output}" README.md LICENSE
-        else
-          tar -czf "go-rag-${version}-${GOOS}-${GOARCH}.tar.gz" "${output}" README.md LICENSE
-        fi
       shell: bash
+
+    - name: Create archive (Unix)
+      if: ${{ !contains(matrix.target, 'windows') }}
+      run: |
+        version="${{ github.ref_name }}"
+        GOOS="${{ contains(matrix.target, 'darwin') && 'darwin' || 'linux' }}"
+        GOARCH="${{ matrix.arch }}"
+        output="go-rag-${GOOS}-${GOARCH}"
+        tar -czf "go-rag-${version}-${GOOS}-${GOARCH}.tar.gz" "${output}" README.md LICENSE
+      shell: bash
+
+    - name: Create archive (Windows)
+      if: contains(matrix.target, 'windows')
+      run: |
+        $version = "${{ github.ref_name }}"
+        $output = "go-rag-windows-amd64.exe"
+        Compress-Archive -Path $output, README.md, LICENSE -DestinationPath "go-rag-${version}-windows-amd64.zip"
+      shell: pwsh
 
     - name: Upload artifact (binary)
       uses: actions/upload-artifact@v4
