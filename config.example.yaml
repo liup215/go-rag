@@ -1,0 +1,36 @@
+# go-rag configuration example
+# Copy this file to your config directory and modify as needed
+
+# Embedding service configuration
+embedding:
+  # OpenAI-compatible API URL
+  # Examples:
+  #   - OpenAI: https://api.openai.com/v1
+  #   - Ollama: http://localhost:11434
+  url: "https://api.openai.com/v1"
+  
+  # API key (required for most services)
+  api_key: "sk-your-api-key-here"
+  
+  # Model name
+  # Examples:
+  #   - OpenAI: text-embedding-3-small, text-embedding-3-large, text-embedding-ada-002
+  #   - Ollama: nomic-embed-text, mxbai-embed-large
+  model: "text-embedding-3-small"
+
+# Text chunking configuration
+chunking:
+  # Target chunk size in tokens
+  max_tokens: 512
+  
+  # Overlap between chunks in tokens
+  overlap: 100
+
+# Storage configuration
+storage:
+  # Path to SQLite database
+  # Uses platform-specific default if not set:
+  #   - Windows: %LOCALAPPDATA%\go-rag\db.sqlite
+  #   - macOS: ~/Library/Application Support/go-rag/db.sqlite
+  #   - Linux: ~/.local/share/go-rag/db.sqlite
+  path: ""
