@@ -22,6 +22,29 @@ import (
 
 const version = "0.1.0"
 
+// reorderArgs moves flags (and their values) before positional arguments.
+// The standard flag package stops parsing at the first non-flag argument,
+// so this allows users to place flags after positional args.
+func reorderArgs(args []string) []string {
+	var flags, positional []string
+	for i := 0; i < len(args); {
+		arg := args[i]
+		if strings.HasPrefix(arg, "-") {
+			flags = append(flags, arg)
+			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+				flags = append(flags, args[i+1])
+				i += 2
+			} else {
+				i++
+			}
+		} else {
+			positional = append(positional, arg)
+			i++
+		}
+	}
+	return append(flags, positional...)
+}
+
 func main() {
 	if len(os.Args) < 2 {
 		printUsage()
@@ -70,6 +93,7 @@ func printUsage() {
 	fmt.Println("  search <query>          Search the knowledge base")
 	fmt.Println("    --top-k <n>           Number of results (default: 5)")
 	fmt.Println("    --threshold <f>       Similarity threshold (default: 0.5)")
+	fmt.Println("    --doc-id <id>         Restrict search to a specific document ID")
 	fmt.Println("  list                    List all documents")
 	fmt.Println("  delete <doc-id>         Delete a document")
 	fmt.Println("  config <set|get|list|help>       Manage configuration")
@@ -104,7 +128,7 @@ func handleAdd() {
 	overlap := fs.Int("overlap", 100, "Overlap size in tokens")
 	workers := fs.Int("workers", 10, "Number of concurrent workers (default: 10)")
 
-	fs.Parse(os.Args[2:])
+	fs.Parse(reorderArgs(os.Args[2:]))
 
 	if fs.NArg() < 1 {
 		fmt.Fprintf(os.Stderr, "Error: file path required\n")
@@ -358,8 +382,9 @@ func handleSearch() {
 	fs := flag.NewFlagSet("search", flag.ExitOnError)
 	topK := fs.Int("top-k", 5, "Number of results")
 	threshold := fs.Float64("threshold", 0.5, "Similarity threshold")
+	docID := fs.String("doc-id", "", "Restrict search to a specific document ID")
 
-	fs.Parse(os.Args[2:])
+	fs.Parse(reorderArgs(os.Args[2:]))
 
 	if fs.NArg() < 1 {
 		fmt.Fprintf(os.Stderr, "Error: query required\n")
@@ -396,9 +421,10 @@ func handleSearch() {
 	// Search
 	ctx := context.Background()
 	results, err := ret.Search(ctx, retriever.SearchOptions{
-		Query:     query,
-		TopK:      *topK,
-		Threshold: *threshold,
+		Query:      query,
+		TopK:       *topK,
+		Threshold:  *threshold,
+		DocumentID: *docID,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error searching: %v\n", err)
@@ -416,12 +442,7 @@ func handleSearch() {
 		fmt.Printf("--- Result %d (score: %.4f) ---\n", i+1, result.Score)
 		fmt.Printf("Document ID: %s\n", result.Chunk.DocumentID)
 		fmt.Printf("Chunk %d:\n", result.Chunk.Index)
-		// Truncate text if too long
-		text := result.Chunk.Text
-		if len(text) > 500 {
-			text = text[:500] + "..."
-		}
-		fmt.Println(text)
+		fmt.Println(result.Chunk.Text)
 		fmt.Println()
 	}
 }
