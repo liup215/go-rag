@@ -35,15 +35,15 @@ curl -L -o go-rag "https://github.com/user/go-rag/releases/latest/download/go-ra
 chmod +x go-rag
 
 # macOS (Intel)
-curl -L -o go-rag "https://github.com/user/go-rag/releases/latest/download/go-rag-darwin-amd64"
+curl -L -o go-rag "https://github.com/liup215/go-rag/releases/latest/download/go-rag-darwin-amd64"
 chmod +x go-rag
 
 # Linux (x64)
-curl -L -o go-rag "https://github.com/user/go-rag/releases/latest/download/go-rag-linux-amd64"
+curl -L -o go-rag "https://github.com/liup215/go-rag/releases/latest/download/go-rag-linux-amd64"
 chmod +x go-rag
 
 # Windows (PowerShell)
-Invoke-WebRequest -Uri "https://github.com/user/go-rag/releases/latest/download/go-rag-windows-amd64.exe" -OutFile "go-rag.exe"
+Invoke-WebRequest -Uri "https://github.com/liup215/go-rag/releases/latest/download/go-rag-windows-amd64.exe" -OutFile "go-rag.exe"
 ```
 
 ### Step 2: Move to PATH
@@ -52,8 +52,13 @@ Invoke-WebRequest -Uri "https://github.com/user/go-rag/releases/latest/download/
 # macOS/Linux
 sudo mv go-rag /usr/local/bin/
 
-# Windows (PowerShell as Admin)
-Move-Item go-rag.exe C:\Windows\System32\
+# Windows (PowerShell)
+# Create directory and move binary
+New-Item -ItemType Directory -Path "$env:LOCALAPPDATA\Programs\go-rag" -Force
+Move-Item go-rag.exe "$env:LOCALAPPDATA\Programs\go-rag\"
+
+# Add to PATH (if not already added)
+[Environment]::SetEnvironmentVariable("Path", $env:Path + ";$env:LOCALAPPDATA\Programs\go-rag", "User")
 ```
 
 ### Step 3: Initialize

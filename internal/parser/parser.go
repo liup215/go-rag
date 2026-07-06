@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/razvandimescu/gopdf/pdf"
 )
 
 // ParseResult contains the parsed text and metadata.
@@ -41,12 +43,18 @@ func ParseFile(filePath string) (*ParseResult, error) {
 	ext := strings.ToLower(filepath.Ext(filePath))
 
 	switch ext {
-	case ".txt", ".md", ".markdown":
+	case ".txt", ".md", ".markdown", ".text":
 		return parseText(string(data), ext)
 	case ".html", ".htm":
 		return parseHTML(string(data))
-	case ".xml":
+	case ".xml", ".svg":
 		return parseXML(string(data))
+	case ".json":
+		return parseJSON(data)
+	case ".yaml", ".yml":
+		return parseYAML(data)
+	case ".csv":
+		return parseCSV(string(data))
 	case ".pdf":
 		return parsePDF(data)
 	case ".docx":
@@ -55,6 +63,12 @@ func ParseFile(filePath string) (*ParseResult, error) {
 		return parseXLSX(data)
 	case ".pptx":
 		return parsePPTX(data)
+	case ".doc":
+		return parseOldDOC(data)
+	case ".rtf":
+		return parseRTF(string(data))
+	case ".go", ".py", ".js", ".ts", ".java", ".c", ".cpp", ".h", ".hpp", ".cs", ".php", ".rb", ".rs", ".swift", ".kt", ".scala", ".sh", ".bash", ".ps1", ".sql", ".css", ".scss", ".less":
+		return parseCode(string(data), ext)
 	default:
 		// Try to parse as text
 		return parseText(string(data), ext)
@@ -133,15 +147,58 @@ func parseXML(content string) (*ParseResult, error) {
 	}, nil
 }
 
-// parsePDF parses PDF files (basic text extraction).
+// parsePDF parses PDF files using gopdf (pure Go).
+// gopdf reconstructs text lines and handles intra-word spacing internally,
+// avoiding the per-letter spacing problems seen with coordinate-based parsers.
 func parsePDF(data []byte) (*ParseResult, error) {
-	// Basic PDF text extraction by looking for text streams
-	// This is a simplified implementation
-	text := extractPDFText(data)
-	text = cleanText(text)
+	// Create a temporary file since gopdf needs a file path
+	tmpFile, err := os.CreateTemp("", "go-rag-*.pdf")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create temp file: %w", err)
+	}
+	defer os.Remove(tmpFile.Name())
+
+	if _, err := tmpFile.Write(data); err != nil {
+		tmpFile.Close()
+		return nil, fmt.Errorf("failed to write temp file: %w", err)
+	}
+	tmpFile.Close()
+
+	// Open PDF
+	doc, err := pdf.OpenFile(tmpFile.Name())
+	if err != nil {
+		return nil, fmt.Errorf("open pdf: %w", err)
+	}
+
+	// Extract text from all pages
+	var all strings.Builder
+	for i := 0; i < doc.NumPages(); i++ {
+		page := doc.Page(i)
+		lines, err := page.TextLines()
+		if err != nil {
+			return nil, fmt.Errorf("extract page %d: %w", i+1, err)
+		}
+		for _, line := range lines {
+			if line.Text == "" {
+				continue
+			}
+			if all.Len() > 0 {
+				all.WriteByte('\n')
+			}
+			all.WriteString(line.Text)
+		}
+		if i < doc.NumPages()-1 && len(lines) > 0 {
+			all.WriteByte('\n')
+		}
+	}
+
+	result := strings.TrimSpace(all.String())
+	if result == "" {
+		return nil, fmt.Errorf("no text extracted from pdf")
+	}
 
 	return &ParseResult{
-		Text:     text,
+		Text:     result,
 		FileType: ".pdf",
 	}, nil
 }
@@ -352,26 +409,6 @@ func extractTitle(s string) string {
 	return ""
 }
 
-func extractPDFText(data []byte) string {
-	// Very basic PDF text extraction
-	// Look for text between BT (Begin Text) and ET (End Text) markers
-	// and between ( and ) for text strings
-
-	var text strings.Builder
-	content := string(data)
-
-	// Find text in parentheses
-	re := regexp.MustCompile(`\(([^\\)]*)\)`)
-	matches := re.FindAllStringSubmatch(content, -1)
-	for _, match := range matches {
-		if len(match) > 1 && len(match[1]) > 2 {
-			text.WriteString(match[1])
-			text.WriteString(" ")
-		}
-	}
-
-	return text.String()
-}
 
 func extractDOCXText(xml string) string {
 	// Extract text from <w:t> tags
@@ -436,4 +473,147 @@ func extractPPTXText(xml string) string {
 	}
 
 	return text.String()
+}
+
+// parseJSON parses JSON files and extracts text from string values.
+func parseJSON(data []byte) (*ParseResult, error) {
+	// Simple JSON string extraction using regex
+	// This extracts all string values from JSON
+	re := regexp.MustCompile(`"([^"\\]*(\\.[^"\\]*)*)"`)
+	matches := re.FindAllStringSubmatch(string(data), -1)
+
+	var text strings.Builder
+	for _, match := range matches {
+		if len(match) > 1 {
+			// Skip JSON keys (usually followed by :)
+			s := match[1]
+			if len(s) > 0 && !strings.HasPrefix(s, "{") && !strings.HasPrefix(s, "[") {
+				text.WriteString(s)
+				text.WriteString(" ")
+			}
+		}
+	}
+
+	result := cleanText(text.String())
+	return &ParseResult{
+		Text:     result,
+		FileType: ".json",
+	}, nil
+}
+
+// parseYAML parses YAML files and extracts text content.
+func parseYAML(data []byte) (*ParseResult, error) {
+	// Extract text values from YAML (lines with : value or - value)
+	lines := strings.Split(string(data), "\n")
+	var text strings.Builder
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		// Skip comments and empty lines
+		if strings.HasPrefix(line, "#") || line == "" {
+			continue
+		}
+		// Extract value after colon
+		if idx := strings.Index(line, ":"); idx > 0 {
+			value := strings.TrimSpace(line[idx+1:])
+			if value != "" && !strings.HasPrefix(value, "{") && !strings.HasPrefix(value, "[") {
+				text.WriteString(value)
+				text.WriteString(" ")
+			}
+		}
+	}
+
+	result := cleanText(text.String())
+	return &ParseResult{
+		Text:     result,
+		FileType: ".yaml",
+	}, nil
+}
+
+// parseCSV parses CSV files and extracts text content.
+func parseCSV(content string) (*ParseResult, error) {
+	lines := strings.Split(content, "\n")
+	var text strings.Builder
+
+	for _, line := range lines {
+		// Simple CSV parsing - split by comma and clean up
+		fields := strings.Split(line, ",")
+		for _, field := range fields {
+			field = strings.TrimSpace(field)
+			// Remove quotes if present
+			if strings.HasPrefix(field, "\"") && strings.HasSuffix(field, "\"") {
+				field = field[1 : len(field)-1]
+			}
+			if field != "" {
+				text.WriteString(field)
+				text.WriteString(" ")
+			}
+		}
+	}
+
+	result := cleanText(text.String())
+	return &ParseResult{
+		Text:     result,
+		FileType: ".csv",
+	}, nil
+}
+
+// parseOldDOC parses legacy .doc files (basic text extraction).
+func parseOldDOC(data []byte) (*ParseResult, error) {
+	// Legacy DOC format is binary, try to extract readable text
+	// This is a basic implementation that looks for text patterns
+	var text strings.Builder
+
+	// Look for sequences of printable ASCII characters
+	re := regexp.MustCompile(`[\x20-\x7E]{4,}`)
+	matches := re.FindAll(data, -1)
+
+	for _, match := range matches {
+		s := string(match)
+		// Filter out common binary patterns
+		if !strings.Contains(s, "<?xml") && !strings.Contains(s, "<!DOCTYPE") {
+			text.WriteString(s)
+			text.WriteString(" ")
+		}
+	}
+
+	result := cleanText(text.String())
+	if len(result) < 100 {
+		return nil, fmt.Errorf("legacy .doc format not fully supported, please convert to .docx")
+	}
+
+	return &ParseResult{
+		Text:     result,
+		FileType: ".doc",
+	}, nil
+}
+
+// parseRTF parses RTF files and extracts text.
+func parseRTF(content string) (*ParseResult, error) {
+	// Remove RTF control words and extract text
+	// This is a simplified implementation
+	re := regexp.MustCompile(`\\[a-z]+\d*\s*|\\'[0-9a-fA-F]{2}|\\[~{}]|\\\n|[{}]`)
+	text := re.ReplaceAllString(content, " ")
+
+	// Replace common RTF escape sequences
+	text = strings.ReplaceAll(text, "\\par", "\n")
+	text = strings.ReplaceAll(text, "\\tab", "\t")
+	text = strings.ReplaceAll(text, "\\line", "\n")
+	text = strings.ReplaceAll(text, "\\page", "\n")
+
+	result := cleanText(text)
+	return &ParseResult{
+		Text:     result,
+		FileType: ".rtf",
+	}, nil
+}
+
+// parseCode parses source code files and extracts text with comments.
+func parseCode(content string, ext string) (*ParseResult, error) {
+	// For code files, we keep the content as-is but clean up excessive whitespace
+	result := cleanText(content)
+	return &ParseResult{
+		Text:     result,
+		FileType: ext,
+	}, nil
 }

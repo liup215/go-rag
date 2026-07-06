@@ -12,16 +12,16 @@ import (
 
 // Retriever performs hybrid search on the knowledge base.
 type Retriever struct {
-	storage   *storage.Storage
+	storage   storage.Storage
 	embedder  embedder.Embedder
 	threshold float64
 }
 
 // NewRetriever creates a new Retriever.
-func NewRetriever(storage *storage.Storage, embedder embedder.Embedder) *Retriever {
+func NewRetriever(store storage.Storage, emb embedder.Embedder) *Retriever {
 	return &Retriever{
-		storage:   storage,
-		embedder:  embedder,
+		storage:   store,
+		embedder:  emb,
 		threshold: 0.5, // Default similarity threshold
 	}
 }
