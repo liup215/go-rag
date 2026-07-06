@@ -6,15 +6,39 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
 	_ "modernc.org/sqlite"
 )
 
-// SQLiteStorage implements storage using SQLite database
+// writeOpType identifies the kind of write operation to be executed serially.
+type writeOpType int
+
+const (
+	opCreateDocument writeOpType = iota
+	opUpdateDocumentStatus
+	opDeleteDocument
+	opCreateChunk
+	opCreateChunks
+)
+
+// writeOp represents a single database write request sent to the worker.
+type writeOp struct {
+	opType  writeOpType
+	payload interface{}
+	result  chan error
+}
+
+// SQLiteStorage implements storage using SQLite database.
+// All mutating operations are funneled through a single worker goroutine via
+// writeCh to avoid SQLITE_BUSY errors from concurrent writes.
 type SQLiteStorage struct {
-	db *sql.DB
+	db      *sql.DB
+	writeCh chan writeOp
+	done    chan struct{}
+	wg      sync.WaitGroup
 }
 
 // NewSQLiteStorage creates a new SQLite storage instance
@@ -41,7 +65,29 @@ func NewSQLiteStorage(dbPath string) (*SQLiteStorage, error) {
 		return nil, err
 	}
 
-	return &SQLiteStorage{db: db}, nil
+	s := &SQLiteStorage{
+		db:      db,
+		writeCh: make(chan writeOp, 64),
+		done:    make(chan struct{}),
+	}
+	s.startWorker()
+	return s, nil
+}
+
+// startWorker launches the single goroutine responsible for all writes.
+func (s *SQLiteStorage) startWorker() {
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		for {
+			select {
+			case <-s.done:
+				return
+			case op := <-s.writeCh:
+				op.result <- s.execWriteOp(op)
+			}
+		}
+	}()
 }
 
 func createTables(db *sql.DB) error {
@@ -79,12 +125,119 @@ func createTables(db *sql.DB) error {
 	return nil
 }
 
-// Close closes the database connection
+// Close shuts down the write worker and closes the database connection.
 func (s *SQLiteStorage) Close() error {
+	close(s.done)
+	// Drain any pending write operations so callers are not blocked forever.
+	for {
+		select {
+		case op := <-s.writeCh:
+			op.result <- s.execWriteOp(op)
+		default:
+			goto drained
+		}
+	}
+drained:
+	s.wg.Wait()
 	return s.db.Close()
 }
 
-// CreateDocument creates a new document record
+// sendWriteOp sends an operation to the worker and waits for its result.
+// Returns an error if the storage has already been closed.
+func (s *SQLiteStorage) sendWriteOp(op writeOp) error {
+	result := make(chan error, 1)
+	op.result = result
+	select {
+	case s.writeCh <- op:
+		return <-result
+	case <-s.done:
+		return fmt.Errorf("storage closed")
+	}
+}
+
+// execWriteOp performs the actual database write for a writeOp.
+// It is always executed by the single worker goroutine.
+func (s *SQLiteStorage) execWriteOp(op writeOp) error {
+	switch op.opType {
+	case opCreateDocument:
+		doc := op.payload.(*Document)
+		_, err := s.db.Exec(`
+			INSERT INTO documents (id, name, file_path, doc_type, content_type, status, error, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			doc.ID, doc.Name, doc.FilePath, doc.DocType, doc.ContentType, doc.Status, doc.Error, doc.CreatedAt, doc.UpdatedAt,
+		)
+		return err
+
+	case opUpdateDocumentStatus:
+		p := op.payload.(struct {
+			id      string
+			status  string
+			errMsg  string
+			updated time.Time
+		})
+		_, err := s.db.Exec(`
+			UPDATE documents SET status = ?, error = ?, updated_at = ? WHERE id = ?`,
+			p.status, p.errMsg, p.updated, p.id,
+		)
+		return err
+
+	case opDeleteDocument:
+		id := op.payload.(string)
+		_, err := s.db.Exec(`DELETE FROM documents WHERE id = ?`, id)
+		return err
+
+	case opCreateChunk:
+		chunk := op.payload.(*Chunk)
+		var emb []byte
+		if len(chunk.Embedding) > 0 {
+			emb = float32sToBytes(chunk.Embedding)
+		}
+		_, err := s.db.Exec(`
+			INSERT INTO chunks (id, document_id, text, chunk_index, embedding, created_at)
+			VALUES (?, ?, ?, ?, ?, ?)`,
+			chunk.ID, chunk.DocumentID, chunk.Text, chunk.Index, emb, chunk.CreatedAt,
+		)
+		return err
+
+	case opCreateChunks:
+		chunks := op.payload.([]Chunk)
+		tx, err := s.db.Begin()
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback()
+
+		stmt, err := tx.Prepare(`
+			INSERT INTO chunks (id, document_id, text, chunk_index, embedding, created_at)
+			VALUES (?, ?, ?, ?, ?, ?)`)
+		if err != nil {
+			return err
+		}
+		defer stmt.Close()
+
+		now := time.Now().UTC()
+		for _, chunk := range chunks {
+			if chunk.ID == "" {
+				chunk.ID = uuid.NewString()
+			}
+
+			var emb []byte
+			if len(chunk.Embedding) > 0 {
+				emb = float32sToBytes(chunk.Embedding)
+			}
+
+			if _, err := stmt.Exec(chunk.ID, chunk.DocumentID, chunk.Text, chunk.Index, emb, now); err != nil {
+				return err
+			}
+		}
+		return tx.Commit()
+
+	default:
+		return fmt.Errorf("unknown write operation: %d", op.opType)
+	}
+}
+
+// CreateDocument creates a new document record.
 func (s *SQLiteStorage) CreateDocument(doc *Document) error {
 	if doc.ID == "" {
 		doc.ID = uuid.NewString()
@@ -93,21 +246,18 @@ func (s *SQLiteStorage) CreateDocument(doc *Document) error {
 	doc.CreatedAt = now
 	doc.UpdatedAt = now
 
-	_, err := s.db.Exec(`
-		INSERT INTO documents (id, name, file_path, doc_type, content_type, status, error, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		doc.ID, doc.Name, doc.FilePath, doc.DocType, doc.ContentType, doc.Status, doc.Error, doc.CreatedAt, doc.UpdatedAt,
-	)
-	return err
+	return s.sendWriteOp(writeOp{opType: opCreateDocument, payload: doc})
 }
 
-// UpdateDocumentStatus updates document status
+// UpdateDocumentStatus updates document status.
 func (s *SQLiteStorage) UpdateDocumentStatus(id, status, errMsg string) error {
-	_, err := s.db.Exec(`
-		UPDATE documents SET status = ?, error = ?, updated_at = ? WHERE id = ?`,
-		status, errMsg, time.Now().UTC(), id,
-	)
-	return err
+	payload := struct {
+		id      string
+		status  string
+		errMsg  string
+		updated time.Time
+	}{id: id, status: status, errMsg: errMsg, updated: time.Now().UTC()}
+	return s.sendWriteOp(writeOp{opType: opUpdateDocumentStatus, payload: payload})
 }
 
 // GetDocument retrieves a document by ID
@@ -153,13 +303,12 @@ func (s *SQLiteStorage) ListDocuments(limit, offset int) ([]Document, error) {
 	return docs, rows.Err()
 }
 
-// DeleteDocument deletes a document and its chunks
+// DeleteDocument deletes a document and its chunks.
 func (s *SQLiteStorage) DeleteDocument(id string) error {
-	_, err := s.db.Exec(`DELETE FROM documents WHERE id = ?`, id)
-	return err
+	return s.sendWriteOp(writeOp{opType: opDeleteDocument, payload: id})
 }
 
-// CreateChunk creates a single chunk (for async processing)
+// CreateChunk creates a single chunk (for async processing).
 func (s *SQLiteStorage) CreateChunk(chunk *Chunk) error {
 	if chunk.ID == "" {
 		chunk.ID = uuid.NewString()
@@ -167,57 +316,15 @@ func (s *SQLiteStorage) CreateChunk(chunk *Chunk) error {
 	if chunk.CreatedAt.IsZero() {
 		chunk.CreatedAt = time.Now().UTC()
 	}
-
-	var emb []byte
-	if len(chunk.Embedding) > 0 {
-		emb = float32sToBytes(chunk.Embedding)
-	}
-
-	_, err := s.db.Exec(`
-		INSERT INTO chunks (id, document_id, text, chunk_index, embedding, created_at)
-		VALUES (?, ?, ?, ?, ?, ?)`,
-		chunk.ID, chunk.DocumentID, chunk.Text, chunk.Index, emb, chunk.CreatedAt,
-	)
-	return err
+	return s.sendWriteOp(writeOp{opType: opCreateChunk, payload: chunk})
 }
 
-// CreateChunks creates multiple chunks in a transaction
+// CreateChunks creates multiple chunks in a transaction.
 func (s *SQLiteStorage) CreateChunks(chunks []Chunk) error {
 	if len(chunks) == 0 {
 		return nil
 	}
-
-	tx, err := s.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-
-	stmt, err := tx.Prepare(`
-		INSERT INTO chunks (id, document_id, text, chunk_index, embedding, created_at)
-		VALUES (?, ?, ?, ?, ?, ?)`)
-	if err != nil {
-		return err
-	}
-	defer stmt.Close()
-
-	now := time.Now().UTC()
-	for _, chunk := range chunks {
-		if chunk.ID == "" {
-			chunk.ID = uuid.NewString()
-		}
-
-		var emb []byte
-		if len(chunk.Embedding) > 0 {
-			emb = float32sToBytes(chunk.Embedding)
-		}
-
-		if _, err := stmt.Exec(chunk.ID, chunk.DocumentID, chunk.Text, chunk.Index, emb, now); err != nil {
-			return err
-		}
-	}
-
-	return tx.Commit()
+	return s.sendWriteOp(writeOp{opType: opCreateChunks, payload: chunks})
 }
 
 // GetChunksByDocument retrieves all chunks for a document

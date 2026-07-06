@@ -329,12 +329,12 @@ func handleAdd() {
 	fmt.Printf("   Total time: %s\n", formatDuration(totalDuration))
 	fmt.Printf("   Average speed: %.1f chunks/second\n", float64(completedChunks)/totalDuration.Seconds())
 	
-	// Update status
+	// Update status or clean up on failure
 	if hasErrors {
-		if err := store.UpdateDocumentStatus(doc.ID, "partial", fmt.Sprintf("%d batches failed", failedBatches)); err != nil {
-			fmt.Fprintf(os.Stderr, "Error updating status: %v\n", err)
+		if err := store.DeleteDocument(doc.ID); err != nil {
+			fmt.Fprintf(os.Stderr, "Error cleaning up document after failure: %v\n", err)
 		}
-		fmt.Printf("\n⚠ Document indexed with some errors (ID: %s)\n", doc.ID)
+		fmt.Printf("\n⚠ Indexing failed: %d batch(es) failed. Document and chunks have been removed.\n", failedBatches)
 	} else {
 		if err := store.UpdateDocumentStatus(doc.ID, "indexed", ""); err != nil {
 			fmt.Fprintf(os.Stderr, "Error updating status: %v\n", err)
