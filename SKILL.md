@@ -31,7 +31,7 @@ Download the appropriate binary from GitHub Releases based on your platform:
 
 ```bash
 # macOS (Apple Silicon)
-curl -L -o go-rag "https://github.com/user/go-rag/releases/latest/download/go-rag-darwin-arm64"
+curl -L -o go-rag "https://github.com/liup215/go-rag/releases/latest/download/go-rag-darwin-arm64"
 chmod +x go-rag
 
 # macOS (Intel)
@@ -40,6 +40,10 @@ chmod +x go-rag
 
 # Linux (x64)
 curl -L -o go-rag "https://github.com/liup215/go-rag/releases/latest/download/go-rag-linux-amd64"
+chmod +x go-rag
+
+# Linux (ARM64)
+curl -L -o go-rag "https://github.com/liup215/go-rag/releases/latest/download/go-rag-linux-arm64"
 chmod +x go-rag
 
 # Windows (PowerShell)
