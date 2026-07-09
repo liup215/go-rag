@@ -14,6 +14,11 @@ import (
 // A value of 60 is recommended in the original RRF paper.
 const rrfK = 60
 
+// candidateMultiplier controls how many candidates each retriever fetches
+// before RRF fusion.  Fetching more candidates improves recall at the cost of
+// latency.  The final result set is always trimmed to TopK.
+const candidateMultiplier = 10
+
 // Retriever performs hybrid search on the knowledge base.
 type Retriever struct {
 	storage   storage.Storage
@@ -88,7 +93,7 @@ func (r *Retriever) hybridSearch(ctx context.Context, opts SearchOptions) ([]sto
 	}
 
 	// Each retriever produces a wider candidate pool for better recall before fusion.
-	candidateK := opts.TopK * 10
+	candidateK := opts.TopK * candidateMultiplier
 	if candidateK < 20 {
 		candidateK = 20
 	}
@@ -202,8 +207,10 @@ func (r *Retriever) keywordSearch(opts SearchOptions) ([]storage.SearchResult, e
 }
 
 // reciprocalRankFusion fuses two ranked result lists using Reciprocal Rank
-// Fusion (RRF).  Each chunk receives a score of 1/(rrfK+rank) from every list
-// it appears in, and the lists are merged and re-sorted by the combined score.
+// Fusion (RRF).  For each list, the item at position i (0-based) receives a
+// score contribution of 1/(rrfK + i + 1), which matches the standard RRF
+// formula with 1-based rank indexing.  Contributions from all lists are summed
+// and the merged list is returned sorted by descending combined score.
 func reciprocalRankFusion(vecResults, bm25Results []storage.SearchResult) []storage.SearchResult {
 	scores := make(map[string]float64)
 	byID := make(map[string]storage.Chunk)
