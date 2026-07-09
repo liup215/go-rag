@@ -418,6 +418,12 @@ func handleSearch() {
 	ret := retriever.NewRetriever(store, emb)
 	ret.SetThreshold(*threshold)
 
+	// Attach reranker when configured and enabled.
+	if cfg.Reranker.Enabled && cfg.Reranker.URL != "" {
+		rr := retriever.NewCrossEncoderReranker(cfg.Reranker.URL, cfg.Reranker.APIKey, cfg.Reranker.Model)
+		ret.SetReranker(rr)
+	}
+
 	// Search
 	ctx := context.Background()
 	results, err := ret.Search(ctx, retriever.SearchOptions{
@@ -580,6 +586,10 @@ func handleConfig() {
 		fmt.Printf("  chunking.max-tokens = %d\n", cfg.Chunking.MaxTokens)
 		fmt.Printf("  chunking.overlap = %d\n", cfg.Chunking.Overlap)
 		fmt.Printf("  storage.path = %s\n", cfg.Storage.Path)
+		fmt.Printf("  reranker.enabled = %v\n", cfg.Reranker.Enabled)
+		fmt.Printf("  reranker.url = %s\n", cfg.Reranker.URL)
+		fmt.Printf("  reranker.api-key = %s\n", maskAPIKey(cfg.Reranker.APIKey))
+		fmt.Printf("  reranker.model = %s\n", cfg.Reranker.Model)
 		fmt.Printf("\nConfig file: %s\n", config.ConfigPath())
 
 	case "help":
@@ -620,7 +630,7 @@ func printConfigHelp() {
 	}
 
 	// Print by category
-	for _, category := range []string{"embedding", "chunking", "storage"} {
+	for _, category := range []string{"embedding", "chunking", "storage", "reranker"} {
 		if items, ok := categories[category]; ok {
 			fmt.Printf("[%s]\n", category)
 			for _, item := range items {
