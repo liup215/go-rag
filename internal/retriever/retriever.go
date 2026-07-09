@@ -23,6 +23,7 @@ const candidateMultiplier = 10
 type Retriever struct {
 	storage   storage.Storage
 	embedder  embedder.Embedder
+	reranker  Reranker
 	threshold float64
 }
 
@@ -40,6 +41,12 @@ func (r *Retriever) SetThreshold(threshold float64) {
 	r.threshold = threshold
 }
 
+// SetReranker sets the reranker used to re-score results after initial
+// retrieval.  Pass nil to disable reranking.
+func (r *Retriever) SetReranker(rr Reranker) {
+	r.reranker = rr
+}
+
 // SearchOptions contains search parameters.
 type SearchOptions struct {
 	Query      string
@@ -51,6 +58,11 @@ type SearchOptions struct {
 // Search performs hybrid search (vector + BM25) when an embedder is available,
 // fusing the results with Reciprocal Rank Fusion.  When no embedder is
 // configured it falls back to BM25-only keyword search.
+//
+// When a Reranker is configured, Search fetches a wider candidate pool
+// (TopK * rerankerCandidateMultiplier) before reranking and trimming to TopK.
+// If the reranker call fails, Search falls back to the original retrieval order
+// without propagating the error.
 func (r *Retriever) Search(ctx context.Context, opts SearchOptions) ([]storage.SearchResult, error) {
 	if opts.TopK <= 0 {
 		opts.TopK = 5
@@ -59,11 +71,40 @@ func (r *Retriever) Search(ctx context.Context, opts SearchOptions) ([]storage.S
 		opts.Threshold = r.threshold
 	}
 
-	if r.embedder != nil {
-		return r.hybridSearch(ctx, opts)
+	// When a reranker is set, fetch more candidates so the cross-encoder has
+	// a richer pool to re-score before we trim to the requested TopK.
+	candidateOpts := opts
+	if r.reranker != nil {
+		expanded := opts.TopK * rerankerCandidateMultiplier
+		if expanded > candidateOpts.TopK {
+			candidateOpts.TopK = expanded
+		}
 	}
 
-	return r.keywordSearch(opts)
+	var results []storage.SearchResult
+	var err error
+	if r.embedder != nil {
+		results, err = r.hybridSearch(ctx, candidateOpts)
+	} else {
+		results, err = r.keywordSearch(candidateOpts)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	// Apply reranker when configured; fall back to retrieval order on error.
+	if r.reranker != nil && len(results) > 0 {
+		reranked, rerankErr := r.reranker.Rerank(ctx, opts.Query, results)
+		if rerankErr == nil {
+			results = reranked
+		}
+		// Trim to the originally requested TopK regardless of reranker outcome.
+		if len(results) > opts.TopK {
+			results = results[:opts.TopK]
+		}
+	}
+
+	return results, nil
 }
 
 // hybridSearch runs vector similarity search and BM25 in parallel over the
