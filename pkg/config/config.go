@@ -179,7 +179,9 @@ func (c *Config) Set(key, value string) error {
 	return c.Save()
 }
 
-// Get gets a configuration value by key
+// Get returns the raw configuration value for key.  Sensitive fields such as
+// api-key are returned in plain text; use GetDisplay when the value will be
+// shown in terminal output.
 func (c *Config) Get(key string) (string, error) {
 	switch key {
 	case "embedding.url":
