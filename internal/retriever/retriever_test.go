@@ -161,8 +161,8 @@ func TestReciprocalRankFusion_Merges(t *testing.T) {
 		}
 	}
 
-	// "b" appeared in both lists at rank 1 in bm25 and rank 1 in vec, so it
-	// should score higher than "a" (vec-only) and "c" (bm25-only).
+	// "b" appeared in both lists: rank 1 (index 0) in bm25 and rank 2 (index 1)
+	// in vec, giving it the highest combined RRF score.
 	if fused[0].Chunk.ID != "b" {
 		t.Errorf("expected 'b' as top fused result (appeared in both lists), got %q", fused[0].Chunk.ID)
 	}
