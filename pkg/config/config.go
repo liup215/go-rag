@@ -14,6 +14,7 @@ type Config struct {
 	Embedding EmbeddingConfig `yaml:"embedding"`
 	Chunking  ChunkingConfig  `yaml:"chunking"`
 	Storage   StorageConfig   `yaml:"storage"`
+	Reranker  RerankerConfig  `yaml:"reranker"`
 }
 
 // EmbeddingConfig holds embedding service configuration
@@ -32,6 +33,16 @@ type ChunkingConfig struct {
 // StorageConfig holds storage configuration
 type StorageConfig struct {
 	Path string `yaml:"path"`
+}
+
+// RerankerConfig holds cross-encoder reranker configuration.
+// When Enabled is true and URL is non-empty, the retriever applies a
+// reranking pass after the initial hybrid search.
+type RerankerConfig struct {
+	Enabled bool   `yaml:"enabled"`
+	URL     string `yaml:"url"`
+	APIKey  string `yaml:"api_key"`
+	Model   string `yaml:"model"`
 }
 
 // DefaultConfig returns a default configuration
@@ -154,13 +165,23 @@ func (c *Config) Set(key, value string) error {
 		c.Chunking.Overlap = parseInt(value, 100)
 	case "storage.path":
 		c.Storage.Path = value
+	case "reranker.enabled":
+		c.Reranker.Enabled = value == "true" || value == "1" || value == "yes"
+	case "reranker.url":
+		c.Reranker.URL = value
+	case "reranker.api-key":
+		c.Reranker.APIKey = value
+	case "reranker.model":
+		c.Reranker.Model = value
 	default:
 		return fmt.Errorf("unknown config key: %s", key)
 	}
 	return c.Save()
 }
 
-// Get gets a configuration value by key
+// Get returns the raw configuration value for key.  Sensitive fields such as
+// api-key are returned in plain text; use GetDisplay when the value will be
+// shown in terminal output.
 func (c *Config) Get(key string) (string, error) {
 	switch key {
 	case "embedding.url":
@@ -175,6 +196,17 @@ func (c *Config) Get(key string) (string, error) {
 		return fmt.Sprintf("%d", c.Chunking.Overlap), nil
 	case "storage.path":
 		return c.Storage.Path, nil
+	case "reranker.enabled":
+		if c.Reranker.Enabled {
+			return "true", nil
+		}
+		return "false", nil
+	case "reranker.url":
+		return c.Reranker.URL, nil
+	case "reranker.api-key":
+		return c.Reranker.APIKey, nil
+	case "reranker.model":
+		return c.Reranker.Model, nil
 	default:
 		return "", fmt.Errorf("unknown config key: %s", key)
 	}
@@ -186,6 +218,53 @@ func parseInt(s string, defaultVal int) int {
 		return defaultVal
 	}
 	return val
+}
+
+// maskSecret replaces a potentially sensitive string with a masked
+// representation, matching the format used by the CLI display helpers.
+func maskSecret(s string) string {
+	if s == "" {
+		return "(not set)"
+	}
+	if len(s) <= 8 {
+		return "****"
+	}
+	return s[:4] + "..." + s[len(s)-4:]
+}
+
+// GetDisplay returns the display-safe value for the given key.  For keys that
+// hold API keys or other secrets the value is masked so it does not appear in
+// plain text in terminal output.  All keys are handled directly without
+// delegating to Get, so that static analysis can confirm no sensitive field
+// ever reaches an unmasked output path.
+func (c *Config) GetDisplay(key string) (string, error) {
+	switch key {
+	case "embedding.url":
+		return c.Embedding.URL, nil
+	case "embedding.api-key":
+		return maskSecret(c.Embedding.APIKey), nil
+	case "embedding.model":
+		return c.Embedding.Model, nil
+	case "chunking.max-tokens":
+		return fmt.Sprintf("%d", c.Chunking.MaxTokens), nil
+	case "chunking.overlap":
+		return fmt.Sprintf("%d", c.Chunking.Overlap), nil
+	case "storage.path":
+		return c.Storage.Path, nil
+	case "reranker.enabled":
+		if c.Reranker.Enabled {
+			return "true", nil
+		}
+		return "false", nil
+	case "reranker.url":
+		return c.Reranker.URL, nil
+	case "reranker.api-key":
+		return maskSecret(c.Reranker.APIKey), nil
+	case "reranker.model":
+		return c.Reranker.Model, nil
+	default:
+		return "", fmt.Errorf("unknown config key: %s", key)
+	}
 }
 
 // ConfigItem represents a configuration item with its description
@@ -241,6 +320,34 @@ func GetConfigItems() []ConfigItem {
 			Default:     "(platform-specific)",
 			Required:    false,
 			Category:    "storage",
+		},
+		{
+			Key:         "reranker.enabled",
+			Description: "Enable cross-encoder reranking after initial retrieval (true/false)",
+			Default:     "false",
+			Required:    false,
+			Category:    "reranker",
+		},
+		{
+			Key:         "reranker.url",
+			Description: "Reranker API endpoint URL (e.g., http://localhost:8080/rerank)",
+			Default:     "(none)",
+			Required:    false,
+			Category:    "reranker",
+		},
+		{
+			Key:         "reranker.api-key",
+			Description: "API key for authentication with the reranker service",
+			Default:     "(none)",
+			Required:    false,
+			Category:    "reranker",
+		},
+		{
+			Key:         "reranker.model",
+			Description: "Reranker model name (e.g., bge-reranker-v2-m3, jina-reranker-v2-base-multilingual)",
+			Default:     "(none)",
+			Required:    false,
+			Category:    "reranker",
 		},
 	}
 }
