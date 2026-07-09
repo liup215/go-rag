@@ -10,6 +10,15 @@ import (
 	"github.com/user/go-rag/internal/storage"
 )
 
+// rrfK is the constant used in Reciprocal Rank Fusion (RRF).
+// A value of 60 is recommended in the original RRF paper.
+const rrfK = 60
+
+// candidateMultiplier controls how many candidates each retriever fetches
+// before RRF fusion.  Fetching more candidates improves recall at the cost of
+// latency.  The final result set is always trimmed to TopK.
+const candidateMultiplier = 10
+
 // Retriever performs hybrid search on the knowledge base.
 type Retriever struct {
 	storage   storage.Storage
@@ -39,7 +48,9 @@ type SearchOptions struct {
 	DocumentID string
 }
 
-// Search performs hybrid search (vector + keyword fallback).
+// Search performs hybrid search (vector + BM25) when an embedder is available,
+// fusing the results with Reciprocal Rank Fusion.  When no embedder is
+// configured it falls back to BM25-only keyword search.
 func (r *Retriever) Search(ctx context.Context, opts SearchOptions) ([]storage.SearchResult, error) {
 	if opts.TopK <= 0 {
 		opts.TopK = 5
@@ -48,100 +59,136 @@ func (r *Retriever) Search(ctx context.Context, opts SearchOptions) ([]storage.S
 		opts.Threshold = r.threshold
 	}
 
-	// Try vector search first if embedder is available
 	if r.embedder != nil {
-		results, err := r.vectorSearch(ctx, opts)
-		if err == nil && len(results) > 0 {
-			return results, nil
-		}
-		// Fall back to keyword search on error
+		return r.hybridSearch(ctx, opts)
 	}
 
-	// Fallback to keyword search
 	return r.keywordSearch(opts)
 }
 
-// vectorSearch performs vector-based similarity search.
-func (r *Retriever) vectorSearch(ctx context.Context, opts SearchOptions) ([]storage.SearchResult, error) {
-	// Get query embedding
-	queryEmbeddings, err := r.embedder.Embed(ctx, []string{opts.Query})
-	if err != nil {
-		return nil, fmt.Errorf("failed to embed query: %w", err)
-	}
-
-	if len(queryEmbeddings) == 0 || len(queryEmbeddings[0]) == 0 {
-		return nil, fmt.Errorf("empty query embedding")
-	}
-
-	queryVec := queryEmbeddings[0]
-
-	// Get all chunks with embeddings
+// hybridSearch runs vector similarity search and BM25 in parallel over the
+// same candidate set, then fuses the ranked lists with RRF.
+func (r *Retriever) hybridSearch(ctx context.Context, opts SearchOptions) ([]storage.SearchResult, error) {
+	// Load all embedded chunks once; they are used for both retrieval methods.
 	chunks, err := r.storage.GetAllChunks()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get chunks: %w", err)
 	}
-
 	if len(chunks) == 0 {
 		return nil, nil
 	}
 
-	// Score all chunks
-	type scoredChunk struct {
+	// Apply optional document-scoped filter.
+	if opts.DocumentID != "" {
+		filtered := chunks[:0]
+		for _, c := range chunks {
+			if c.DocumentID == opts.DocumentID {
+				filtered = append(filtered, c)
+			}
+		}
+		chunks = filtered
+	}
+	if len(chunks) == 0 {
+		return nil, nil
+	}
+
+	// Each retriever produces a wider candidate pool for better recall before fusion.
+	candidateK := opts.TopK * candidateMultiplier
+	if candidateK < 20 {
+		candidateK = 20
+	}
+
+	// --- Vector search ---
+	vecResults, vecErr := r.vectorSearchOnChunks(ctx, chunks, opts, candidateK)
+	if vecErr != nil {
+		// If embedding fails fall back to BM25-only.
+		idx := BuildBM25Index(chunks)
+		bm25Raw := idx.Search(opts.Query, opts.TopK)
+		results := make([]storage.SearchResult, len(bm25Raw))
+		for i, br := range bm25Raw {
+			results[i] = storage.SearchResult{Chunk: br.chunk, Score: br.score}
+		}
+		return results, nil
+	}
+
+	// --- BM25 search ---
+	idx := BuildBM25Index(chunks)
+	bm25Raw := idx.Search(opts.Query, candidateK)
+	bm25Results := make([]storage.SearchResult, len(bm25Raw))
+	for i, br := range bm25Raw {
+		bm25Results[i] = storage.SearchResult{Chunk: br.chunk, Score: br.score}
+	}
+
+	// --- RRF fusion ---
+	fused := reciprocalRankFusion(vecResults, bm25Results)
+	if len(fused) > opts.TopK {
+		fused = fused[:opts.TopK]
+	}
+
+	return fused, nil
+}
+
+// vectorSearchOnChunks scores a pre-loaded slice of chunks against the query
+// embedding and returns up to candidateK results above the similarity threshold.
+func (r *Retriever) vectorSearchOnChunks(
+	ctx context.Context,
+	chunks []storage.Chunk,
+	opts SearchOptions,
+	candidateK int,
+) ([]storage.SearchResult, error) {
+	queryEmbeddings, err := r.embedder.Embed(ctx, []string{opts.Query})
+	if err != nil {
+		return nil, fmt.Errorf("failed to embed query: %w", err)
+	}
+	if len(queryEmbeddings) == 0 || len(queryEmbeddings[0]) == 0 {
+		return nil, fmt.Errorf("empty query embedding")
+	}
+	queryVec := queryEmbeddings[0]
+
+	type sv struct {
 		chunk storage.Chunk
 		score float64
 	}
+	scored := make([]sv, 0, len(chunks))
 
-	var scored []scoredChunk
 	for _, chunk := range chunks {
 		if len(chunk.Embedding) == 0 || len(chunk.Embedding) != len(queryVec) {
 			continue
 		}
-		if opts.DocumentID != "" && chunk.DocumentID != opts.DocumentID {
-			continue
-		}
-
 		score := cosineSimilarity(queryVec, chunk.Embedding)
 		if score >= opts.Threshold {
-			scored = append(scored, scoredChunk{chunk: chunk, score: score})
+			scored = append(scored, sv{chunk, score})
 		}
 	}
 
-	// Sort by score descending
 	sort.Slice(scored, func(i, j int) bool {
 		return scored[i].score > scored[j].score
 	})
-
-	// Take top K
-	if len(scored) > opts.TopK {
-		scored = scored[:opts.TopK]
+	if len(scored) > candidateK {
+		scored = scored[:candidateK]
 	}
 
-	// Convert to results
 	results := make([]storage.SearchResult, len(scored))
-	for i, sc := range scored {
-		results[i] = storage.SearchResult{
-			Chunk: sc.chunk,
-			Score: sc.score,
-		}
+	for i, s := range scored {
+		results[i] = storage.SearchResult{Chunk: s.chunk, Score: s.score}
 	}
-
 	return results, nil
 }
 
-// keywordSearch performs keyword-based search using FTS5.
+// keywordSearch performs BM25-based keyword search without a vector embedder.
 func (r *Retriever) keywordSearch(opts SearchOptions) ([]storage.SearchResult, error) {
 	var chunks []storage.Chunk
 	var err error
 
 	if opts.DocumentID != "" {
-		// When scoped to a document, score all chunks of that document
-		// instead of relying on a global keyword limit that may exclude it.
+		// Score all chunks of the target document.
 		chunks, err = r.storage.GetChunksByDocument(opts.DocumentID)
 	} else {
-		// Get more results than needed for better coverage
-		limit := opts.TopK * 3
-		if limit < 20 {
-			limit = 20
+		// Pre-filter with a keyword LIKE query to reduce the candidate set,
+		// then apply BM25 scoring on top.
+		limit := opts.TopK * 10
+		if limit < 50 {
+			limit = 50
 		}
 		chunks, err = r.storage.SearchByKeyword(opts.Query, limit)
 	}
@@ -149,44 +196,49 @@ func (r *Retriever) keywordSearch(opts SearchOptions) ([]storage.SearchResult, e
 		return nil, fmt.Errorf("keyword search failed: %w", err)
 	}
 
-	// Score results based on keyword overlap
-	queryTokens := tokenize(opts.Query)
+	idx := BuildBM25Index(chunks)
+	bm25Raw := idx.Search(opts.Query, opts.TopK)
 
-	type scoredChunk struct {
-		chunk storage.Chunk
-		score float64
+	results := make([]storage.SearchResult, len(bm25Raw))
+	for i, br := range bm25Raw {
+		results[i] = storage.SearchResult{Chunk: br.chunk, Score: br.score}
+	}
+	return results, nil
+}
+
+// reciprocalRankFusion fuses two ranked result lists using Reciprocal Rank
+// Fusion (RRF).  For each list, the item at position i (0-based) receives a
+// score contribution of 1/(rrfK + i + 1), which matches the standard RRF
+// formula with 1-based rank indexing.  Contributions from all lists are summed
+// and the merged list is returned sorted by descending combined score.
+func reciprocalRankFusion(vecResults, bm25Results []storage.SearchResult) []storage.SearchResult {
+	scores := make(map[string]float64)
+	byID := make(map[string]storage.Chunk)
+
+	for rank, res := range vecResults {
+		scores[res.Chunk.ID] += 1.0 / float64(rrfK+rank+1)
+		byID[res.Chunk.ID] = res.Chunk
+	}
+	for rank, res := range bm25Results {
+		scores[res.Chunk.ID] += 1.0 / float64(rrfK+rank+1)
+		if _, exists := byID[res.Chunk.ID]; !exists {
+			byID[res.Chunk.ID] = res.Chunk
+		}
 	}
 
-	var scored []scoredChunk
-	for _, chunk := range chunks {
-		if opts.DocumentID != "" && chunk.DocumentID != opts.DocumentID {
-			continue
-		}
-		score := keywordScore(chunk.Text, queryTokens)
-		if score >= opts.Threshold {
-			scored = append(scored, scoredChunk{chunk: chunk, score: score})
-		}
+	results := make([]storage.SearchResult, 0, len(scores))
+	for id, score := range scores {
+		results = append(results, storage.SearchResult{
+			Chunk: byID[id],
+			Score: score,
+		})
 	}
 
-	// Sort by score
-	sort.Slice(scored, func(i, j int) bool {
-		return scored[i].score > scored[j].score
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].Score > results[j].Score
 	})
 
-	// Take top K
-	if len(scored) > opts.TopK {
-		scored = scored[:opts.TopK]
-	}
-
-	results := make([]storage.SearchResult, len(scored))
-	for i, sc := range scored {
-		results[i] = storage.SearchResult{
-			Chunk: sc.chunk,
-			Score: sc.score,
-		}
-	}
-
-	return results, nil
+	return results
 }
 
 // cosineSimilarity calculates cosine similarity between two vectors.
@@ -210,38 +262,13 @@ func cosineSimilarity(a, b []float32) float64 {
 	return dot / (math.Sqrt(na) * math.Sqrt(nb))
 }
 
-// tokenize splits text into tokens.
+// tokenize splits text into normalised tokens.
 func tokenize(s string) []string {
 	words := splitWords(s)
 	for i := range words {
 		words[i] = normalizeWord(words[i])
 	}
 	return filterEmpty(words)
-}
-
-// keywordScore calculates keyword overlap score.
-func keywordScore(text string, queryTokens []string) float64 {
-	textTokens := tokenize(text)
-	if len(textTokens) == 0 || len(queryTokens) == 0 {
-		return 0
-	}
-
-	// Build set of text tokens
-	textSet := make(map[string]bool)
-	for _, t := range textTokens {
-		textSet[t] = true
-	}
-
-	// Count matches
-	matches := 0
-	for _, q := range queryTokens {
-		if textSet[q] {
-			matches++
-		}
-	}
-
-	// Return normalized score
-	return float64(matches) / float64(len(queryTokens))
 }
 
 // Helper functions
