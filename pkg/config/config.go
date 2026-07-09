@@ -11,10 +11,12 @@ import (
 
 // Config holds all configuration for go-rag
 type Config struct {
-	Embedding EmbeddingConfig `yaml:"embedding"`
-	Chunking  ChunkingConfig  `yaml:"chunking"`
-	Storage   StorageConfig   `yaml:"storage"`
-	Reranker  RerankerConfig  `yaml:"reranker"`
+	Embedding    EmbeddingConfig    `yaml:"embedding"`
+	Chunking     ChunkingConfig     `yaml:"chunking"`
+	Storage      StorageConfig      `yaml:"storage"`
+	Reranker     RerankerConfig     `yaml:"reranker"`
+	Corrective   CorrectiveConfig   `yaml:"corrective"`
+	QueryRewrite QueryRewriteConfig `yaml:"query_rewrite"`
 }
 
 // EmbeddingConfig holds embedding service configuration
@@ -45,6 +47,24 @@ type RerankerConfig struct {
 	Model   string `yaml:"model"`
 }
 
+// CorrectiveConfig holds Corrective RAG configuration.
+type CorrectiveConfig struct {
+	Enabled      bool   `yaml:"enabled"`
+	EvaluatorURL string `yaml:"evaluator_url"`
+	APIKey       string `yaml:"api_key"`
+	Model        string `yaml:"model"`
+	WebSearchURL string `yaml:"web_search_url"`
+}
+
+// QueryRewriteConfig holds query rewriting configuration.
+type QueryRewriteConfig struct {
+	Enabled    bool   `yaml:"enabled"`
+	MaxQueries int    `yaml:"max_queries"`
+	URL        string `yaml:"url"`
+	APIKey     string `yaml:"api_key"`
+	Model      string `yaml:"model"`
+}
+
 // DefaultConfig returns a default configuration
 func DefaultConfig() *Config {
 	return &Config{
@@ -58,6 +78,9 @@ func DefaultConfig() *Config {
 		},
 		Storage: StorageConfig{
 			Path: defaultStoragePath(),
+		},
+		QueryRewrite: QueryRewriteConfig{
+			MaxQueries: 3,
 		},
 	}
 }
@@ -173,6 +196,26 @@ func (c *Config) Set(key, value string) error {
 		c.Reranker.APIKey = value
 	case "reranker.model":
 		c.Reranker.Model = value
+	case "corrective.enabled":
+		c.Corrective.Enabled = value == "true" || value == "1" || value == "yes"
+	case "corrective.evaluator-url":
+		c.Corrective.EvaluatorURL = value
+	case "corrective.api-key":
+		c.Corrective.APIKey = value
+	case "corrective.model":
+		c.Corrective.Model = value
+	case "corrective.web-search-url":
+		c.Corrective.WebSearchURL = value
+	case "query-rewrite.enabled":
+		c.QueryRewrite.Enabled = value == "true" || value == "1" || value == "yes"
+	case "query-rewrite.max-queries":
+		c.QueryRewrite.MaxQueries = parseInt(value, 3)
+	case "query-rewrite.url":
+		c.QueryRewrite.URL = value
+	case "query-rewrite.api-key":
+		c.QueryRewrite.APIKey = value
+	case "query-rewrite.model":
+		c.QueryRewrite.Model = value
 	default:
 		return fmt.Errorf("unknown config key: %s", key)
 	}
@@ -207,6 +250,32 @@ func (c *Config) Get(key string) (string, error) {
 		return c.Reranker.APIKey, nil
 	case "reranker.model":
 		return c.Reranker.Model, nil
+	case "corrective.enabled":
+		if c.Corrective.Enabled {
+			return "true", nil
+		}
+		return "false", nil
+	case "corrective.evaluator-url":
+		return c.Corrective.EvaluatorURL, nil
+	case "corrective.api-key":
+		return c.Corrective.APIKey, nil
+	case "corrective.model":
+		return c.Corrective.Model, nil
+	case "corrective.web-search-url":
+		return c.Corrective.WebSearchURL, nil
+	case "query-rewrite.enabled":
+		if c.QueryRewrite.Enabled {
+			return "true", nil
+		}
+		return "false", nil
+	case "query-rewrite.max-queries":
+		return fmt.Sprintf("%d", c.QueryRewrite.MaxQueries), nil
+	case "query-rewrite.url":
+		return c.QueryRewrite.URL, nil
+	case "query-rewrite.api-key":
+		return c.QueryRewrite.APIKey, nil
+	case "query-rewrite.model":
+		return c.QueryRewrite.Model, nil
 	default:
 		return "", fmt.Errorf("unknown config key: %s", key)
 	}
@@ -262,6 +331,32 @@ func (c *Config) GetDisplay(key string) (string, error) {
 		return maskSecret(c.Reranker.APIKey), nil
 	case "reranker.model":
 		return c.Reranker.Model, nil
+	case "corrective.enabled":
+		if c.Corrective.Enabled {
+			return "true", nil
+		}
+		return "false", nil
+	case "corrective.evaluator-url":
+		return c.Corrective.EvaluatorURL, nil
+	case "corrective.api-key":
+		return maskSecret(c.Corrective.APIKey), nil
+	case "corrective.model":
+		return c.Corrective.Model, nil
+	case "corrective.web-search-url":
+		return c.Corrective.WebSearchURL, nil
+	case "query-rewrite.enabled":
+		if c.QueryRewrite.Enabled {
+			return "true", nil
+		}
+		return "false", nil
+	case "query-rewrite.max-queries":
+		return fmt.Sprintf("%d", c.QueryRewrite.MaxQueries), nil
+	case "query-rewrite.url":
+		return c.QueryRewrite.URL, nil
+	case "query-rewrite.api-key":
+		return maskSecret(c.QueryRewrite.APIKey), nil
+	case "query-rewrite.model":
+		return c.QueryRewrite.Model, nil
 	default:
 		return "", fmt.Errorf("unknown config key: %s", key)
 	}
@@ -348,6 +443,76 @@ func GetConfigItems() []ConfigItem {
 			Default:     "(none)",
 			Required:    false,
 			Category:    "reranker",
+		},
+		{
+			Key:         "corrective.enabled",
+			Description: "Enable Corrective RAG quality assessment and correction strategy (true/false)",
+			Default:     "false",
+			Required:    false,
+			Category:    "corrective",
+		},
+		{
+			Key:         "corrective.evaluator-url",
+			Description: "Optional LLM evaluator endpoint URL for retrieval quality assessment",
+			Default:     "(none)",
+			Required:    false,
+			Category:    "corrective",
+		},
+		{
+			Key:         "corrective.api-key",
+			Description: "API key for corrective evaluator endpoint",
+			Default:     "(none)",
+			Required:    false,
+			Category:    "corrective",
+		},
+		{
+			Key:         "corrective.model",
+			Description: "Model name for corrective evaluator endpoint",
+			Default:     "(none)",
+			Required:    false,
+			Category:    "corrective",
+		},
+		{
+			Key:         "corrective.web-search-url",
+			Description: "Web search fallback endpoint URL for low-quality retrieval",
+			Default:     "(none)",
+			Required:    false,
+			Category:    "corrective",
+		},
+		{
+			Key:         "query-rewrite.enabled",
+			Description: "Enable query rewriting and multi-query expansion retrieval (true/false)",
+			Default:     "false",
+			Required:    false,
+			Category:    "query-rewrite",
+		},
+		{
+			Key:         "query-rewrite.max-queries",
+			Description: "Maximum number of rewritten queries used during multi-query retrieval",
+			Default:     "3",
+			Required:    false,
+			Category:    "query-rewrite",
+		},
+		{
+			Key:         "query-rewrite.url",
+			Description: "Optional LLM query rewriter endpoint URL",
+			Default:     "(none)",
+			Required:    false,
+			Category:    "query-rewrite",
+		},
+		{
+			Key:         "query-rewrite.api-key",
+			Description: "API key for query rewriter endpoint",
+			Default:     "(none)",
+			Required:    false,
+			Category:    "query-rewrite",
+		},
+		{
+			Key:         "query-rewrite.model",
+			Description: "Model name for query rewriter endpoint",
+			Default:     "(none)",
+			Required:    false,
+			Category:    "query-rewrite",
 		},
 	}
 }

@@ -424,6 +424,27 @@ func handleSearch() {
 		ret.SetReranker(rr)
 	}
 
+	// Attach query rewriter when configured and enabled.
+	if cfg.QueryRewrite.Enabled {
+		var qr retriever.QueryRewriter = retriever.NewRuleBasedQueryRewriter()
+		if cfg.QueryRewrite.URL != "" {
+			qr = retriever.NewLLMQueryRewriter(cfg.QueryRewrite.URL, cfg.QueryRewrite.APIKey, cfg.QueryRewrite.Model)
+		}
+		ret.SetQueryRewriter(qr, cfg.QueryRewrite.MaxQueries)
+	}
+
+	// Attach corrective evaluator and optional web fallback when enabled.
+	if cfg.Corrective.Enabled {
+		var evaluator retriever.QAEvaluator = retriever.NewHeuristicQAEvaluator()
+		if cfg.Corrective.EvaluatorURL != "" {
+			evaluator = retriever.NewLLMQAEvaluator(cfg.Corrective.EvaluatorURL, cfg.Corrective.APIKey, cfg.Corrective.Model)
+		}
+		ret.SetQAEvaluator(evaluator)
+		if cfg.Corrective.WebSearchURL != "" {
+			ret.SetWebSearcher(retriever.NewHTTPWebSearcher(cfg.Corrective.WebSearchURL, cfg.Corrective.APIKey))
+		}
+	}
+
 	// Search
 	ctx := context.Background()
 	results, err := ret.Search(ctx, retriever.SearchOptions{
@@ -591,6 +612,18 @@ func handleConfig() {
 		rerankerKey, _ := cfg.GetDisplay("reranker.api-key")
 		fmt.Printf("  reranker.api-key = %s\n", rerankerKey)
 		fmt.Printf("  reranker.model = %s\n", cfg.Reranker.Model)
+		fmt.Printf("  corrective.enabled = %v\n", cfg.Corrective.Enabled)
+		fmt.Printf("  corrective.evaluator-url = %s\n", cfg.Corrective.EvaluatorURL)
+		correctiveKey, _ := cfg.GetDisplay("corrective.api-key")
+		fmt.Printf("  corrective.api-key = %s\n", correctiveKey)
+		fmt.Printf("  corrective.model = %s\n", cfg.Corrective.Model)
+		fmt.Printf("  corrective.web-search-url = %s\n", cfg.Corrective.WebSearchURL)
+		fmt.Printf("  query-rewrite.enabled = %v\n", cfg.QueryRewrite.Enabled)
+		fmt.Printf("  query-rewrite.max-queries = %d\n", cfg.QueryRewrite.MaxQueries)
+		fmt.Printf("  query-rewrite.url = %s\n", cfg.QueryRewrite.URL)
+		queryRewriteKey, _ := cfg.GetDisplay("query-rewrite.api-key")
+		fmt.Printf("  query-rewrite.api-key = %s\n", queryRewriteKey)
+		fmt.Printf("  query-rewrite.model = %s\n", cfg.QueryRewrite.Model)
 		fmt.Printf("\nConfig file: %s\n", config.ConfigPath())
 
 	case "help":
@@ -631,7 +664,7 @@ func printConfigHelp() {
 	}
 
 	// Print by category
-	for _, category := range []string{"embedding", "chunking", "storage", "reranker"} {
+	for _, category := range []string{"embedding", "chunking", "storage", "reranker", "corrective", "query-rewrite"} {
 		if items, ok := categories[category]; ok {
 			fmt.Printf("[%s]\n", category)
 			for _, item := range items {

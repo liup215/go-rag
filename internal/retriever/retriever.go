@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"sync"
 
 	"github.com/user/go-rag/internal/embedder"
 	"github.com/user/go-rag/internal/storage"
@@ -21,18 +22,23 @@ const candidateMultiplier = 10
 
 // Retriever performs hybrid search on the knowledge base.
 type Retriever struct {
-	storage   storage.Storage
-	embedder  embedder.Embedder
-	reranker  Reranker
-	threshold float64
+	storage            storage.Storage
+	embedder           embedder.Embedder
+	reranker           Reranker
+	qaEvaluator        QAEvaluator
+	webSearcher        WebSearcher
+	queryRewriter      QueryRewriter
+	rewriteQueryLimit  int
+	threshold          float64
 }
 
 // NewRetriever creates a new Retriever.
 func NewRetriever(store storage.Storage, emb embedder.Embedder) *Retriever {
 	return &Retriever{
-		storage:   store,
-		embedder:  emb,
-		threshold: 0.5, // Default similarity threshold
+		storage:           store,
+		embedder:          emb,
+		rewriteQueryLimit: 3,
+		threshold:         0.5, // Default similarity threshold
 	}
 }
 
@@ -45,6 +51,24 @@ func (r *Retriever) SetThreshold(threshold float64) {
 // retrieval.  Pass nil to disable reranking.
 func (r *Retriever) SetReranker(rr Reranker) {
 	r.reranker = rr
+}
+
+// SetQAEvaluator sets the retrieval quality evaluator used by Corrective RAG.
+func (r *Retriever) SetQAEvaluator(e QAEvaluator) {
+	r.qaEvaluator = e
+}
+
+// SetWebSearcher sets the web search fallback used when retrieval quality is low.
+func (r *Retriever) SetWebSearcher(ws WebSearcher) {
+	r.webSearcher = ws
+}
+
+// SetQueryRewriter sets query rewriting and multi-query expansion behavior.
+func (r *Retriever) SetQueryRewriter(qr QueryRewriter, maxQueries int) {
+	r.queryRewriter = qr
+	if maxQueries > 0 {
+		r.rewriteQueryLimit = maxQueries
+	}
 }
 
 // SearchOptions contains search parameters.
@@ -64,13 +88,79 @@ type SearchOptions struct {
 // If the reranker call fails, Search falls back to the original retrieval order
 // without propagating the error.
 func (r *Retriever) Search(ctx context.Context, opts SearchOptions) ([]storage.SearchResult, error) {
+	opts = r.normalizeSearchOptions(opts)
+
+	queries := []string{opts.Query}
+	if r.queryRewriter != nil {
+		rewritten, err := r.queryRewriter.Rewrite(ctx, opts.Query, r.rewriteQueryLimit)
+		if err == nil {
+			queries = appendUniqueStrings(queries, rewritten...)
+		}
+	}
+
+	results, err := r.searchAcrossQueries(ctx, opts, queries)
+	if err != nil {
+		return nil, err
+	}
+
+	return r.applyCorrectiveStrategy(ctx, opts, results)
+}
+
+func (r *Retriever) normalizeSearchOptions(opts SearchOptions) SearchOptions {
 	if opts.TopK <= 0 {
 		opts.TopK = 5
 	}
 	if opts.Threshold == 0 {
 		opts.Threshold = r.threshold
 	}
+	return opts
+}
 
+func (r *Retriever) searchAcrossQueries(
+	ctx context.Context,
+	opts SearchOptions,
+	queries []string,
+) ([]storage.SearchResult, error) {
+	if len(queries) <= 1 {
+		return r.searchSingle(ctx, opts)
+	}
+
+	resultsByQuery := make([][]storage.SearchResult, len(queries))
+	errs := make([]error, len(queries))
+
+	var wg sync.WaitGroup
+	for i := range queries {
+		i := i
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			queryOpts := opts
+			queryOpts.Query = queries[i]
+			resultsByQuery[i], errs[i] = r.searchSingle(ctx, queryOpts)
+		}()
+	}
+	wg.Wait()
+
+	var merged []storage.SearchResult
+	var firstErr error
+	for i := range errs {
+		if errs[i] != nil {
+			if firstErr == nil {
+				firstErr = errs[i]
+			}
+			continue
+		}
+		merged = append(merged, resultsByQuery[i]...)
+	}
+
+	if len(merged) == 0 && firstErr != nil {
+		return nil, firstErr
+	}
+
+	return dedupeAndSortResults(merged, opts.TopK), nil
+}
+
+func (r *Retriever) searchSingle(ctx context.Context, opts SearchOptions) ([]storage.SearchResult, error) {
 	// When a reranker is set, fetch more candidates so the cross-encoder has
 	// a richer pool to re-score before we trim to the requested TopK.
 	candidateOpts := opts
@@ -105,6 +195,96 @@ func (r *Retriever) Search(ctx context.Context, opts SearchOptions) ([]storage.S
 	}
 
 	return results, nil
+}
+
+func (r *Retriever) applyCorrectiveStrategy(
+	ctx context.Context,
+	opts SearchOptions,
+	results []storage.SearchResult,
+) ([]storage.SearchResult, error) {
+	if r.qaEvaluator == nil {
+		return results, nil
+	}
+
+	quality, err := r.qaEvaluator.Evaluate(ctx, opts.Query, results)
+	if err != nil {
+		return results, nil
+	}
+
+	switch quality {
+	case RetrievalQualityHigh:
+		return results, nil
+	case RetrievalQualityLow:
+		if r.webSearcher == nil {
+			return results, nil
+		}
+		webResults, err := r.webSearcher.Search(ctx, opts.Query, opts.TopK)
+		if err != nil {
+			return results, nil
+		}
+		return dedupeAndSortResults(append(results, webResults...), opts.TopK), nil
+	case RetrievalQualityUncertain:
+		expanded := []string{opts.Query}
+		if r.queryRewriter != nil {
+			rewritten, err := r.queryRewriter.Rewrite(ctx, opts.Query, r.rewriteQueryLimit)
+			if err == nil {
+				expanded = appendUniqueStrings(expanded, rewritten...)
+			}
+		}
+		if len(expanded) == 1 {
+			expanded = append(expanded, opts.Query+" 详细解释")
+		}
+		expandedResults, err := r.searchAcrossQueries(ctx, opts, expanded)
+		if err != nil {
+			return results, nil
+		}
+		return dedupeAndSortResults(append(results, expandedResults...), opts.TopK), nil
+	default:
+		return results, nil
+	}
+}
+
+func dedupeAndSortResults(results []storage.SearchResult, topK int) []storage.SearchResult {
+	byChunk := make(map[string]storage.SearchResult, len(results))
+	for _, res := range results {
+		key := res.Chunk.ID
+		if key == "" {
+			key = res.Chunk.DocumentID + "|" + res.Chunk.Text
+		}
+		if old, ok := byChunk[key]; !ok || res.Score > old.Score {
+			byChunk[key] = res
+		}
+	}
+
+	merged := make([]storage.SearchResult, 0, len(byChunk))
+	for _, res := range byChunk {
+		merged = append(merged, res)
+	}
+	sort.Slice(merged, func(i, j int) bool {
+		return merged[i].Score > merged[j].Score
+	})
+	if topK > 0 && len(merged) > topK {
+		merged = merged[:topK]
+	}
+	return merged
+}
+
+func appendUniqueStrings(base []string, values ...string) []string {
+	seen := make(map[string]struct{}, len(base))
+	for _, v := range base {
+		seen[v] = struct{}{}
+	}
+	for _, v := range values {
+		if v == "" {
+			continue
+		}
+		if _, ok := seen[v]; ok {
+			continue
+		}
+		seen[v] = struct{}{}
+		base = append(base, v)
+	}
+	return base
 }
 
 // hybridSearch runs vector similarity search and BM25 in parallel over the
