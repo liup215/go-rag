@@ -588,7 +588,8 @@ func handleConfig() {
 		fmt.Printf("  storage.path = %s\n", cfg.Storage.Path)
 		fmt.Printf("  reranker.enabled = %v\n", cfg.Reranker.Enabled)
 		fmt.Printf("  reranker.url = %s\n", cfg.Reranker.URL)
-		fmt.Printf("  reranker.api-key = %s\n", maskAPIKey(cfg.Reranker.APIKey))
+		rerankerKey, _ := cfg.GetDisplay("reranker.api-key")
+		fmt.Printf("  reranker.api-key = %s\n", rerankerKey)
 		fmt.Printf("  reranker.model = %s\n", cfg.Reranker.Model)
 		fmt.Printf("\nConfig file: %s\n", config.ConfigPath())
 
