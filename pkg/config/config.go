@@ -218,6 +218,32 @@ func parseInt(s string, defaultVal int) int {
 	return val
 }
 
+// maskSecret replaces a potentially sensitive string with a masked
+// representation, matching the format used by the CLI display helpers.
+func maskSecret(s string) string {
+	if s == "" {
+		return "(not set)"
+	}
+	if len(s) <= 8 {
+		return "****"
+	}
+	return s[:4] + "..." + s[len(s)-4:]
+}
+
+// GetDisplay returns the display-safe value for the given key.  For keys that
+// hold API keys or other secrets the value is masked so it does not appear in
+// plain text in terminal output.
+func (c *Config) GetDisplay(key string) (string, error) {
+	switch key {
+	case "embedding.api-key":
+		return maskSecret(c.Embedding.APIKey), nil
+	case "reranker.api-key":
+		return maskSecret(c.Reranker.APIKey), nil
+	default:
+		return c.Get(key)
+	}
+}
+
 // ConfigItem represents a configuration item with its description
 type ConfigItem struct {
 	Key         string

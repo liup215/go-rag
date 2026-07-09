@@ -571,17 +571,12 @@ func handleConfig() {
 		}
 		key := os.Args[3]
 
-		value, err := cfg.Get(key)
+		value, err := cfg.GetDisplay(key)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error getting config: %v\n", err)
 			os.Exit(1)
 		}
-		// Mask API keys to avoid leaking secrets in terminal output.
-		displayValue := value
-		if strings.HasSuffix(key, "api-key") || strings.HasSuffix(key, "api_key") {
-			displayValue = maskAPIKey(value)
-		}
-		fmt.Printf("%s = %s\n", key, displayValue)
+		fmt.Printf("%s = %s\n", key, value)
 
 	case "list":
 		fmt.Println("Current configuration:")
