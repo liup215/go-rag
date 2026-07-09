@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"github.com/user/go-rag/internal/llm"
+	"github.com/user/go-rag/internal/logger"
 	"github.com/user/go-rag/internal/storage"
 )
 
@@ -265,7 +266,7 @@ func (kgb *KnowledgeGraphBuilder) BuildFromChunks(ctx context.Context, chunks []
 	for _, chunk := range chunks {
 		if err := kgb.extractFromText(ctx, chunk.Text, chunk.DocumentID); err != nil {
 			// Log error but continue processing other chunks
-			fmt.Printf("Warning: failed to extract from chunk %s: %v\n", chunk.ID, err)
+			logger.Warnf("failed to extract from chunk %s: %v", chunk.ID, err)
 			continue
 		}
 	}
@@ -339,7 +340,7 @@ Guidelines:
 		relation.Properties["document_id"] = documentID
 		if err := kgb.graph.AddRelation(relation); err != nil {
 			// Skip invalid relations
-			fmt.Printf("Warning: skipping invalid relation: %v\n", err)
+			logger.Warnf("skipping invalid relation: %v", err)
 		}
 	}
 

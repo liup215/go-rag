@@ -2,6 +2,7 @@ package knowledge
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/user/go-rag/internal/storage"
@@ -23,12 +24,13 @@ func (m *MockLLMClient) SetResponse(key, response string) {
 }
 
 func (m *MockLLMClient) Complete(ctx context.Context, prompt string) (string, error) {
-	// Return pre-configured response for testing
+	// Try to match prompt against configured keys
 	for key, response := range m.responses {
-		if len(prompt) > 0 && len(key) > 0 {
+		if strings.Contains(prompt, key) {
 			return response, nil
 		}
 	}
+	// Default response if no match
 	return `{"entities": [], "relations": []}`, nil
 }
 
@@ -238,7 +240,8 @@ func TestKnowledgeGraphBuilder_ExtractFromText(t *testing.T) {
 
 func TestKnowledgeGraphBuilder_BuildFromChunks(t *testing.T) {
 	mockLLM := NewMockLLMClient()
-	mockLLM.SetResponse("test", `{
+	// Use a key that will be found in the prompt
+	mockLLM.SetResponse("Extract entities and relations", `{
 		"entities": [
 			{
 				"id": "doc_1_entity_1",
@@ -278,7 +281,8 @@ func TestKnowledgeGraphBuilder_BuildFromChunks(t *testing.T) {
 
 func TestGraphRetriever_Search(t *testing.T) {
 	mockLLM := NewMockLLMClient()
-	mockLLM.SetResponse("entity_extraction", `["Go", "Google"]`)
+	// Use a key that will match in the prompt
+	mockLLM.SetResponse("Extract the key entities", `["Go", "Google"]`)
 
 	// Build a test graph
 	kg := NewKnowledgeGraph()
