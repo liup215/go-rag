@@ -106,4 +106,3 @@ func (s *HTTPWebSearcher) Search(
 	}
 	return results, nil
 }
-

@@ -213,112 +213,112 @@ func handleAdd() {
 
 	// Async parallel embedding with progress
 	fmt.Printf("\n🚀 Processing %d chunks with %d concurrent workers...\n\n", len(storageChunks), *workers)
-	
+
 	startTime := time.Now()
 	totalChunks := len(storageChunks)
 	completedChunks := int32(0)
 	failedBatches := int32(0)
-	
+
 	ctx := context.Background()
 	emb := embedder.NewOpenAIEmbedder(cfg.Embedding.APIKey, cfg.Embedding.URL, cfg.Embedding.Model)
-	
+
 	// Calculate batch size
 	batchSize := emb.MaxBatchSize()
 	totalBatches := (totalChunks + batchSize - 1) / batchSize
-	
+
 	// Channel for work distribution
 	type batchWork struct {
 		batchNum int
 		startIdx int
 		endIdx   int
 	}
-	
+
 	workChan := make(chan batchWork, totalBatches)
 	resultChan := make(chan error, totalBatches)
-	
+
 	// Start workers
 	var wg sync.WaitGroup
 	semaphore := make(chan struct{}, *workers)
-	
+
 	for i := 0; i < *workers; i++ {
 		wg.Add(1)
 		go func(workerID int) {
 			defer wg.Done()
-			
+
 			for work := range workChan {
 				semaphore <- struct{}{} // Acquire
-				
+
 				batchStartTime := time.Now()
 				batchChunks := storageChunks[work.startIdx:work.endIdx]
 				batchTexts := make([]string, len(batchChunks))
 				for i, chunk := range batchChunks {
 					batchTexts[i] = chunk.Text
 				}
-				
+
 				// Retry logic: 3 attempts
 				var embeddings [][]float32
 				var embedErr error
-				
+
 				for attempt := 1; attempt <= 3; attempt++ {
 					embeddings, embedErr = emb.Embed(ctx, batchTexts)
 					if embedErr == nil {
 						break
 					}
-					
+
 					if attempt < 3 {
-						fmt.Printf("⚠ Batch %d/%d failed (attempt %d/3): %v, retrying...\n", 
+						fmt.Printf("⚠ Batch %d/%d failed (attempt %d/3): %v, retrying...\n",
 							work.batchNum, totalBatches, attempt, embedErr)
 						time.Sleep(time.Duration(attempt) * time.Second) // Exponential backoff
 					}
 				}
-				
+
 				if embedErr != nil {
-					fmt.Printf("✗ Batch %d/%d failed after 3 attempts: %v\n", 
+					fmt.Printf("✗ Batch %d/%d failed after 3 attempts: %v\n",
 						work.batchNum, totalBatches, embedErr)
 					atomic.AddInt32(&failedBatches, 1)
 					resultChan <- embedErr
 					<-semaphore // Release
 					continue
 				}
-				
+
 				// Update chunks with embeddings
 				for i, emb := range embeddings {
 					batchChunks[i].Embedding = emb
 				}
-				
+
 				// Save batch immediately
 				if err := store.CreateChunks(batchChunks); err != nil {
-					fmt.Printf("✗ Batch %d/%d failed to save: %v\n", 
+					fmt.Printf("✗ Batch %d/%d failed to save: %v\n",
 						work.batchNum, totalBatches, err)
 					atomic.AddInt32(&failedBatches, 1)
 					resultChan <- err
 					<-semaphore // Release
 					continue
 				}
-				
+
 				// Update progress
 				completed := atomic.AddInt32(&completedChunks, int32(len(batchChunks)))
 				_ = time.Since(batchStartTime) // Track batch duration for potential metrics
 				elapsed := time.Since(startTime)
-				
+
 				// Calculate ETA
 				progress := float64(completed) / float64(totalChunks)
 				if progress > 0 {
 					eta := time.Duration(float64(elapsed) / progress * (1 - progress))
 					fmt.Printf("✓ Batch %d/%d completed | Progress: %d/%d (%.1f%%) | ETA: %s\n",
-						work.batchNum, totalBatches, completed, totalChunks, progress*100, 
+						work.batchNum, totalBatches, completed, totalChunks, progress*100,
 						formatDuration(eta))
 				} else {
 					fmt.Printf("✓ Batch %d/%d completed | Progress: %d/%d (%.1f%%)\n",
 						work.batchNum, totalBatches, completed, totalChunks, progress*100)
 				}
-				
+
 				resultChan <- nil
 				<-semaphore // Release
 			}
 		}(i)
 	}
-	
+
 	// Distribute work
 	for i := 0; i < totalChunks; i += batchSize {
 		end := i + batchSize
@@ -326,17 +326,17 @@ func handleAdd() {
 			end = totalChunks
 		}
 		workChan <- batchWork{
-			batchNum: (i/batchSize) + 1,
+			batchNum: (i / batchSize) + 1,
 			startIdx: i,
 			endIdx:   end,
 		}
 	}
 	close(workChan)
-	
+
 	// Wait for completion
 	wg.Wait()
 	close(resultChan)
-	
+
 	// Check results
 	totalDuration := time.Since(startTime)
 	hasErrors := false
@@ -345,14 +345,14 @@ func handleAdd() {
 			hasErrors = true
 		}
 	}
-	
+
 	fmt.Printf("\n📊 Summary:\n")
 	fmt.Printf("   Total chunks: %d\n", totalChunks)
 	fmt.Printf("   Completed: %d\n", completedChunks)
 	fmt.Printf("   Failed batches: %d\n", failedBatches)
 	fmt.Printf("   Total time: %s\n", formatDuration(totalDuration))
 	fmt.Printf("   Average speed: %.1f chunks/second\n", float64(completedChunks)/totalDuration.Seconds())
-	
+
 	// Update status or clean up on failure
 	if hasErrors {
 		if err := store.DeleteDocument(doc.ID); err != nil {
