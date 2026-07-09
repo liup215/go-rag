@@ -518,10 +518,6 @@ func cosineSimilarity(a, b []float32) float64 {
 
 	// Use math package for reliable square root calculation
 	denominator := math.Sqrt(na) * math.Sqrt(nb)
-	
-	if denominator == 0 {
-		return 0
-	}
 
 	return dot / denominator
 }

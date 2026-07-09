@@ -181,7 +181,7 @@ func (kg *KnowledgeGraph) ExtractSubgraph(seedEntityIDs []string, maxHops int) *
 		current := queue[0]
 		queue = queue[1:]
 
-		if visited[current.entityID] || current.hops > maxHops {
+		if visited[current.entityID] {
 			continue
 		}
 		visited[current.entityID] = true
