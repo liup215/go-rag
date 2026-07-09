@@ -3,6 +3,7 @@ package retriever
 import (
 	"context"
 	"fmt"
+	"hash/fnv"
 	"math"
 	"sort"
 	"sync"
@@ -20,16 +21,22 @@ const rrfK = 60
 // latency.  The final result set is always trimmed to TopK.
 const candidateMultiplier = 10
 
+// uncertainExpansionSuffix is appended when no query rewriter output is
+// available. The phrase is Chinese ("detailed explanation") to better match
+// the repository's current Chinese education use case, and is used in the
+// UNCERTAIN corrective branch when expansion still only contains the original query.
+const uncertainExpansionSuffix = " 详细解释"
+
 // Retriever performs hybrid search on the knowledge base.
 type Retriever struct {
-	storage            storage.Storage
-	embedder           embedder.Embedder
-	reranker           Reranker
-	qaEvaluator        QAEvaluator
-	webSearcher        WebSearcher
-	queryRewriter      QueryRewriter
-	rewriteQueryLimit  int
-	threshold          float64
+	storage           storage.Storage
+	embedder          embedder.Embedder
+	reranker          Reranker
+	qaEvaluator       QAEvaluator
+	webSearcher       WebSearcher
+	queryRewriter     QueryRewriter
+	rewriteQueryLimit int
+	threshold         float64
 }
 
 // NewRetriever creates a new Retriever.
@@ -130,14 +137,13 @@ func (r *Retriever) searchAcrossQueries(
 
 	var wg sync.WaitGroup
 	for i := range queries {
-		i := i
 		wg.Add(1)
-		go func() {
+		go func(idx int) {
 			defer wg.Done()
 			queryOpts := opts
-			queryOpts.Query = queries[i]
-			resultsByQuery[i], errs[i] = r.searchSingle(ctx, queryOpts)
-		}()
+			queryOpts.Query = queries[idx]
+			resultsByQuery[idx], errs[idx] = r.searchSingle(ctx, queryOpts)
+		}(i)
 	}
 	wg.Wait()
 
@@ -232,7 +238,7 @@ func (r *Retriever) applyCorrectiveStrategy(
 			}
 		}
 		if len(expanded) == 1 {
-			expanded = append(expanded, opts.Query+" 详细解释")
+			expanded = append(expanded, opts.Query+uncertainExpansionSuffix)
 		}
 		expandedResults, err := r.searchAcrossQueries(ctx, opts, expanded)
 		if err != nil {
@@ -249,7 +255,7 @@ func dedupeAndSortResults(results []storage.SearchResult, topK int) []storage.Se
 	for _, res := range results {
 		key := res.Chunk.ID
 		if key == "" {
-			key = res.Chunk.DocumentID + "|" + res.Chunk.Text
+			key = fmt.Sprintf("%s|%x", res.Chunk.DocumentID, hashString64(res.Chunk.Text))
 		}
 		if old, ok := byChunk[key]; !ok || res.Score > old.Score {
 			byChunk[key] = res
@@ -267,6 +273,12 @@ func dedupeAndSortResults(results []storage.SearchResult, topK int) []storage.Se
 		merged = merged[:topK]
 	}
 	return merged
+}
+
+func hashString64(s string) uint64 {
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(s))
+	return h.Sum64()
 }
 
 func appendUniqueStrings(base []string, values ...string) []string {

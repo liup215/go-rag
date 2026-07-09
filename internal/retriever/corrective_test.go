@@ -127,7 +127,7 @@ func TestRetriever_CorrectiveRAG_UncertainExpandsAndRetrievesAgain(t *testing.T)
 	ret.SetQAEvaluator(&mockQAEvaluator{quality: RetrievalQualityUncertain})
 	rw := &sequenceRewriter{
 		rewritesByCall: [][]string{
-			nil,        // first pass: no expansion
+			nil,              // first pass: no expansion
 			{"mitochondria"}, // corrective pass: expand and re-retrieve
 		},
 	}

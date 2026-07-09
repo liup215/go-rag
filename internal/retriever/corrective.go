@@ -59,10 +59,22 @@ func (e *HeuristicQAEvaluator) Evaluate(
 	}
 
 	top := results[0].Score
-	if top >= e.HighScoreThreshold && len(results) >= e.MinHighResults {
+	avgTop := top
+	if len(results) > 1 {
+		n := len(results)
+		if n > 3 {
+			n = 3
+		}
+		sum := 0.0
+		for i := 0; i < n; i++ {
+			sum += results[i].Score
+		}
+		avgTop = sum / float64(n)
+	}
+	if top >= e.HighScoreThreshold && avgTop >= e.HighScoreThreshold && len(results) >= e.MinHighResults {
 		return RetrievalQualityHigh, nil
 	}
-	if top <= e.LowScoreThreshold {
+	if top <= e.LowScoreThreshold && avgTop <= e.LowScoreThreshold*1.5 {
 		return RetrievalQualityLow, nil
 	}
 	return RetrievalQualityUncertain, nil
@@ -156,4 +168,3 @@ func (e *LLMQAEvaluator) Evaluate(
 		return RetrievalQualityUncertain, nil
 	}
 }
-

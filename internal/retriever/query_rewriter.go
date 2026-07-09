@@ -11,6 +11,19 @@ import (
 	"time"
 )
 
+var (
+	defaultTermMappings = map[string]string{
+		"能量工厂": "线粒体",
+		"绿色工厂": "叶绿体",
+	}
+	defaultSynonymMappings = map[string]string{
+		"光合作用": "photosynthesis",
+	}
+	defaultHyponymMappings = map[string][]string{
+		"细胞器": {"线粒体", "叶绿体"},
+	}
+)
+
 // QueryRewriter rewrites one user query into multiple retrieval-friendly queries.
 type QueryRewriter interface {
 	Rewrite(ctx context.Context, query string, maxQueries int) ([]string, error)
@@ -18,24 +31,17 @@ type QueryRewriter interface {
 
 // RuleBasedQueryRewriter rewrites colloquial education queries using domain mappings.
 type RuleBasedQueryRewriter struct {
-	termMappings     map[string]string
-	synonymMappings  map[string]string
-	hyponymMappings  map[string][]string
+	termMappings    map[string]string
+	synonymMappings map[string]string
+	hyponymMappings map[string][]string
 }
 
 // NewRuleBasedQueryRewriter creates a rule-based query rewriter.
 func NewRuleBasedQueryRewriter() *RuleBasedQueryRewriter {
 	return &RuleBasedQueryRewriter{
-		termMappings: map[string]string{
-			"能量工厂": "线粒体",
-			"绿色工厂": "叶绿体",
-		},
-		synonymMappings: map[string]string{
-			"光合作用": "photosynthesis",
-		},
-		hyponymMappings: map[string][]string{
-			"细胞器": {"线粒体", "叶绿体"},
-		},
+		termMappings:    cloneStringMap(defaultTermMappings),
+		synonymMappings: cloneStringMap(defaultSynonymMappings),
+		hyponymMappings: cloneSliceMap(defaultHyponymMappings),
 	}
 }
 
@@ -55,7 +61,13 @@ func (r *RuleBasedQueryRewriter) Rewrite(
 
 	rewrites := make([]string, 0, maxQueries)
 
+	// Rules are applied independently; overlapping terms may generate multiple
+	// rewrite variants and are later deduplicated.
 	for from, to := range r.termMappings {
+		// Avoid over-aggressive expansion for derived words like "能量工厂化".
+		if strings.Contains(query, from+"化") {
+			continue
+		}
 		if strings.Contains(query, from) {
 			rewrites = append(rewrites, strings.ReplaceAll(query, from, to))
 		}
@@ -162,3 +174,18 @@ func (r *LLMQueryRewriter) Rewrite(
 	return queries, nil
 }
 
+func cloneStringMap(in map[string]string) map[string]string {
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
+func cloneSliceMap(in map[string][]string) map[string][]string {
+	out := make(map[string][]string, len(in))
+	for k, v := range in {
+		out[k] = append([]string(nil), v...)
+	}
+	return out
+}
