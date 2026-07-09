@@ -7,7 +7,8 @@ A lightweight RAG (Retrieval-Augmented Generation) command line tool written in 
 - **Pure Go implementation** - No external dependencies
 - **Multiple file formats** - Support for txt, md, html, xml, pdf, docx, xlsx, pptx
 - **External embedding models** - Compatible with OpenAI, Ollama, and other OpenAI-compatible APIs
-- **Hybrid search** - Vector search with keyword fallback
+- **Hybrid search** - Vector search + BM25 keyword search fused with Reciprocal Rank Fusion (RRF)
+- **Cross-encoder reranking** - Optional reranking pass using a bge-reranker or compatible API
 - **JSON storage** - Simple file-based storage, no database dependencies
 - **Cross-platform** - Windows, macOS, Linux (amd64, arm64)
 
@@ -108,6 +109,12 @@ chunking:
 
 storage:
   path: "~/.local/share/go-rag/db.sqlite"
+
+reranker:
+  enabled: false
+  url: ""        # e.g. http://localhost:8080/rerank
+  api_key: ""
+  model: ""      # e.g. bge-reranker-v2-m3
 ```
 
 ## Supported File Formats
@@ -123,6 +130,45 @@ storage:
 | Excel | .xlsx | Office Open XML |
 | PowerPoint | .pptx | Office Open XML |
 
+## Reranking (Cross-Encoder)
+
+When a cross-encoder reranker is configured, `go-rag` applies a two-stage
+retrieval pipeline:
+
+1. **First stage** – Hybrid search (vector + BM25) retrieves a wider candidate
+   pool (`TopK × 3` documents).
+2. **Second stage** – The cross-encoder scores every candidate against the query
+   and returns only the top-`TopK` results re-ordered by relevance.
+
+This cascade strategy gives the cross-encoder a rich pool to work with while
+keeping final result latency low.
+
+### Configure reranking
+
+```bash
+# Enable reranking and point to a locally served bge-reranker
+go-rag config set reranker.enabled true
+go-rag config set reranker.url http://localhost:8080/rerank
+go-rag config set reranker.model bge-reranker-v2-m3
+
+# Or use a hosted API (e.g., Jina Reranker)
+go-rag config set reranker.url https://api.jina.ai/v1/rerank
+go-rag config set reranker.api-key jina_...
+go-rag config set reranker.model jina-reranker-v2-base-multilingual
+```
+
+The reranker API must accept:
+```json
+{"model":"<model>","query":"<query>","documents":["<doc1>","<doc2>"]}
+```
+and return:
+```json
+{"results":[{"index":0,"relevance_score":0.95},{"index":1,"relevance_score":0.42}]}
+```
+
+If the reranker is unavailable or returns an error, `go-rag` automatically
+falls back to the original retrieval order so searches remain available.
+
 ## Architecture
 
 ```
@@ -132,7 +178,7 @@ go-rag/
 │   ├── chunker/         # Text chunking
 │   ├── embedder/        # Embedding client (OpenAI/Ollama)
 │   ├── parser/          # File parsers
-│   ├── retriever/       # Hybrid search
+│   ├── retriever/       # Hybrid search + BM25 + RRF + Reranking
 │   └── storage/         # SQLite storage
 └── pkg/config/          # Configuration management
 ```
@@ -143,10 +189,12 @@ go-rag/
 2. **Chunk**: Split text into overlapping chunks (default 512 tokens)
 3. **Embed**: Generate vector embeddings using external API
 4. **Store**: Save chunks and vectors to SQLite
-5. **Search**: 
+5. **Search**:
    - Generate query embedding
-   - Find similar vectors using cosine similarity
-   - Fall back to keyword search if embedding fails
+   - Run vector similarity search and BM25 keyword search in parallel
+   - Fuse ranked lists with Reciprocal Rank Fusion (RRF)
+   - *(Optional)* Re-score the candidate pool with a cross-encoder reranker
+   - Return top-K results
 
 ## License
 
