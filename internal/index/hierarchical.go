@@ -3,6 +3,7 @@ package index
 import (
 	"context"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"sync"
@@ -515,21 +516,9 @@ func cosineSimilarity(a, b []float32) float64 {
 		return 0
 	}
 
-	// Calculate sqrt separately for better numerical stability
-	denominator := 1.0
-	if na > 0 && nb > 0 {
-		denominator = 1.0
-		sqrtNa := na
-		sqrtNb := nb
-		
-		// Simple iterative sqrt approximation
-		for i := 0; i < 10; i++ {
-			sqrtNa = (sqrtNa + na/sqrtNa) / 2
-			sqrtNb = (sqrtNb + nb/sqrtNb) / 2
-		}
-		denominator = sqrtNa * sqrtNb
-	}
-
+	// Use math package for reliable square root calculation
+	denominator := math.Sqrt(na) * math.Sqrt(nb)
+	
 	if denominator == 0 {
 		return 0
 	}
