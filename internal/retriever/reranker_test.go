@@ -288,7 +288,7 @@ func TestRetriever_RerankerFallback_OnError(t *testing.T) {
 	}
 }
 
-func TestRetriever_NoReranker_OriginalBehaviourUnchanged(t *testing.T) {
+func TestRetriever_NoReranker_OriginalBehaviorUnchanged(t *testing.T) {
 	// Ensure that searches without a reranker still work correctly.
 	vec := []float32{1, 0}
 	chunks := []storage.Chunk{

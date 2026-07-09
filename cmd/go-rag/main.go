@@ -576,7 +576,12 @@ func handleConfig() {
 			fmt.Fprintf(os.Stderr, "Error getting config: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Printf("%s = %s\n", key, value)
+		// Mask API keys to avoid leaking secrets in terminal output.
+		displayValue := value
+		if strings.HasSuffix(key, "api-key") || strings.HasSuffix(key, "api_key") {
+			displayValue = maskAPIKey(value)
+		}
+		fmt.Printf("%s = %s\n", key, displayValue)
 
 	case "list":
 		fmt.Println("Current configuration:")
