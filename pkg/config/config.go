@@ -232,15 +232,36 @@ func maskSecret(s string) string {
 
 // GetDisplay returns the display-safe value for the given key.  For keys that
 // hold API keys or other secrets the value is masked so it does not appear in
-// plain text in terminal output.
+// plain text in terminal output.  All keys are handled directly without
+// delegating to Get, so that static analysis can confirm no sensitive field
+// ever reaches an unmasked output path.
 func (c *Config) GetDisplay(key string) (string, error) {
 	switch key {
+	case "embedding.url":
+		return c.Embedding.URL, nil
 	case "embedding.api-key":
 		return maskSecret(c.Embedding.APIKey), nil
+	case "embedding.model":
+		return c.Embedding.Model, nil
+	case "chunking.max-tokens":
+		return fmt.Sprintf("%d", c.Chunking.MaxTokens), nil
+	case "chunking.overlap":
+		return fmt.Sprintf("%d", c.Chunking.Overlap), nil
+	case "storage.path":
+		return c.Storage.Path, nil
+	case "reranker.enabled":
+		if c.Reranker.Enabled {
+			return "true", nil
+		}
+		return "false", nil
+	case "reranker.url":
+		return c.Reranker.URL, nil
 	case "reranker.api-key":
 		return maskSecret(c.Reranker.APIKey), nil
+	case "reranker.model":
+		return c.Reranker.Model, nil
 	default:
-		return c.Get(key)
+		return "", fmt.Errorf("unknown config key: %s", key)
 	}
 }
 
