@@ -1,4 +1,4 @@
-module github.com/user/go-rag
+module github.com/liup215/go-rag
 
 go 1.25.0
 

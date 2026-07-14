@@ -10,7 +10,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/user/go-rag/internal/storage"
+	"github.com/liup215/go-rag/internal/storage"
 )
 
 // Reranker reorders a list of search results by relevance to the query.

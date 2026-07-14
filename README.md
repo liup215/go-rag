@@ -16,14 +16,14 @@ A lightweight RAG (Retrieval-Augmented Generation) command line tool written in 
 
 ### Download from GitHub Releases
 
-1. Go to [Releases](https://github.com/user/go-rag/releases)
+1. Go to [Releases](https://github.com/liup215/go-rag/releases)
 2. Download the appropriate binary for your platform
 3. Extract and place in your PATH
 
 ### Build from source
 
 ```bash
-git clone https://github.com/user/go-rag.git
+git clone https://github.com/liup215/go-rag.git
 cd go-rag
 go build -o go-rag ./cmd/go-rag
 ```

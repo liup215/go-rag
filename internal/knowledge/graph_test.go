@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/user/go-rag/internal/storage"
+	"github.com/liup215/go-rag/internal/storage"
 )
 
 // MockLLMClient is a mock implementation of llm.Client for testing.

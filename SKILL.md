@@ -213,6 +213,6 @@ go-rag uses SQLite with WAL mode. If you see locking errors:
 
 ## Resources
 
-- GitHub: https://github.com/user/go-rag
-- Releases: https://github.com/user/go-rag/releases
-- Issues: https://github.com/user/go-rag/issues
+- GitHub: https://github.com/liup215/go-rag
+- Releases: https://github.com/liup215/go-rag/releases
+- Issues: https://github.com/liup215/go-rag/issues

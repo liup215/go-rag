@@ -7,9 +7,9 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/user/go-rag/internal/llm"
-	"github.com/user/go-rag/internal/logger"
-	"github.com/user/go-rag/internal/storage"
+	"github.com/liup215/go-rag/internal/llm"
+	"github.com/liup215/go-rag/internal/logger"
+	"github.com/liup215/go-rag/internal/storage"
 )
 
 // Entity represents an entity in the knowledge graph.
