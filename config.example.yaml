@@ -34,3 +34,49 @@ storage:
   #   - macOS: ~/Library/Application Support/go-rag/db.sqlite
   #   - Linux: ~/.local/share/go-rag/db.sqlite
   path: ""
+
+# LLM service configuration (for Graph RAG and Hierarchical Index)
+llm:
+  # OpenAI-compatible API URL
+  # Examples:
+  #   - OpenAI: https://api.openai.com/v1
+  #   - Ollama: http://localhost:11434/v1
+  #   - Local LLM: http://localhost:8080/v1
+  url: "https://api.openai.com/v1"
+  
+  # API key (required for most services)
+  api_key: "sk-your-api-key-here"
+  
+  # Model name
+  # Examples:
+  #   - OpenAI: gpt-4, gpt-3.5-turbo
+  #   - Ollama: llama2, mistral
+  model: "gpt-3.5-turbo"
+
+# Graph RAG configuration
+graph_rag:
+  # Enable graph-based retrieval
+  enabled: false
+  
+  # Maximum number of hops for graph traversal
+  max_hops: 2
+  
+  # Number of top results to return from graph search
+  top_k: 5
+
+# Hierarchical Index configuration
+hierarchical_index:
+  # Enable hierarchical indexing
+  enabled: false
+  
+  # Maximum summary length (characters)
+  max_summary_length: 500
+  
+  # Maximum paragraph length (characters)
+  max_paragraph_length: 2000
+  
+  # Maximum sentence length (characters)
+  max_sentence_length: 200
+  
+  # Similarity threshold for hierarchical search
+  threshold: 0.5
