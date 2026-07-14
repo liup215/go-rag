@@ -12,15 +12,15 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/user/go-rag/internal/chunker"
-	"github.com/user/go-rag/internal/embedder"
-	"github.com/user/go-rag/internal/parser"
-	"github.com/user/go-rag/internal/retriever"
-	"github.com/user/go-rag/internal/storage"
-	"github.com/user/go-rag/pkg/config"
+	"github.com/liup215/go-rag/internal/chunker"
+	"github.com/liup215/go-rag/internal/embedder"
+	"github.com/liup215/go-rag/internal/parser"
+	"github.com/liup215/go-rag/internal/retriever"
+	"github.com/liup215/go-rag/internal/storage"
+	"github.com/liup215/go-rag/pkg/config"
 )
 
-const version = "0.1.0"
+const version = "v0.1.0"
 
 // reorderArgs moves flags (and their values) before positional arguments.
 // The standard flag package stops parsing at the first non-flag argument,

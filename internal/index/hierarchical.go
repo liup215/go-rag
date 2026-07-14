@@ -8,9 +8,9 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/user/go-rag/internal/embedder"
-	"github.com/user/go-rag/internal/llm"
-	"github.com/user/go-rag/internal/storage"
+	"github.com/liup215/go-rag/internal/embedder"
+	"github.com/liup215/go-rag/internal/llm"
+	"github.com/liup215/go-rag/internal/storage"
 )
 
 // Layer represents a level in the hierarchical index.

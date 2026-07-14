@@ -8,7 +8,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/user/go-rag/internal/storage"
+	"github.com/liup215/go-rag/internal/storage"
 )
 
 // ---- CrossEncoderReranker tests --------------------------------------------

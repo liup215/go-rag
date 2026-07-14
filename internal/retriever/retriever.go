@@ -8,8 +8,8 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/user/go-rag/internal/embedder"
-	"github.com/user/go-rag/internal/storage"
+	"github.com/liup215/go-rag/internal/embedder"
+	"github.com/liup215/go-rag/internal/storage"
 )
 
 // rrfK is the constant used in Reciprocal Rank Fusion (RRF).
