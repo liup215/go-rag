@@ -29,6 +29,9 @@ func (m *mockStorage) ListDocuments(limit, offset int) ([]storage.Document, erro
 func (m *mockStorage) DeleteDocument(id string) error          { return nil }
 func (m *mockStorage) CreateChunk(chunk *storage.Chunk) error  { return nil }
 func (m *mockStorage) CreateChunks(chunks []storage.Chunk) error { return nil }
+func (m *mockStorage) GetChunkByIndex(docID string, index int) (*storage.Chunk, error) {
+	return nil, nil
+}
 func (m *mockStorage) GetChunksByDocument(docID string) ([]storage.Chunk, error) {
 	var out []storage.Chunk
 	for _, c := range m.chunks {

@@ -64,6 +64,8 @@ func main() {
 		handleList()
 	case "delete":
 		handleDelete()
+	case "get-chunk":
+		handleGetChunk()
 	case "config":
 		handleConfig()
 	case "config-help":
@@ -96,6 +98,8 @@ func printUsage() {
 	fmt.Println("    --doc-id <id>         Restrict search to a specific document ID")
 	fmt.Println("  list                    List all documents")
 	fmt.Println("  delete <doc-id>         Delete a document")
+	fmt.Println("  get-chunk <doc-id>      Get a chunk by document ID and index")
+	fmt.Println("    --index <n>           Chunk index (required)")
 	fmt.Println("  config <set|get|list|help>       Manage configuration")
 	fmt.Println("    set <key> <value>             Set a configuration value")
 	fmt.Println("    get <key>                     Get a configuration value")
@@ -110,6 +114,7 @@ func printUsage() {
 	fmt.Println("  go-rag config set embedding.api-key sk-...")
 	fmt.Println("  go-rag add document.pdf")
 	fmt.Println("  go-rag search \"machine learning\" --top-k 10")
+	fmt.Println("  go-rag get-chunk <doc-id> --index 3")
 }
 
 func handleInit() {
@@ -551,6 +556,57 @@ func handleDelete() {
 	}
 
 	fmt.Println("Document deleted successfully.")
+}
+
+func handleGetChunk() {
+	fs := flag.NewFlagSet("get-chunk", flag.ExitOnError)
+	index := fs.Int("index", -1, "Chunk index (required)")
+
+	fs.Parse(reorderArgs(os.Args[2:]))
+
+	if fs.NArg() < 1 {
+		fmt.Fprintf(os.Stderr, "Error: document ID required\n")
+		fmt.Fprintf(os.Stderr, "Usage: go-rag get-chunk <doc-id> --index <n>\n")
+		os.Exit(1)
+	}
+
+	if *index < 0 {
+		fmt.Fprintf(os.Stderr, "Error: --index is required and must be >= 0\n")
+		fmt.Fprintf(os.Stderr, "Usage: go-rag get-chunk <doc-id> --index <n>\n")
+		os.Exit(1)
+	}
+
+	docID := fs.Arg(0)
+
+	cfg, err := config.Load()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error loading config: %v\n", err)
+		os.Exit(1)
+	}
+
+	store, err := storage.NewStorage(cfg.Storage.Path)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error initializing storage: %v\n", err)
+		os.Exit(1)
+	}
+
+	chunk, err := store.GetChunkByIndex(docID, *index)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error getting chunk: %v\n", err)
+		os.Exit(1)
+	}
+
+	if chunk == nil {
+		fmt.Fprintf(os.Stderr, "Error: chunk not found for document %s at index %d\n", docID, *index)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Document ID: %s\n", chunk.DocumentID)
+	fmt.Printf("Chunk ID:    %s\n", chunk.ID)
+	fmt.Printf("Chunk Index: %d\n", chunk.Index)
+	fmt.Printf("Created At:  %s\n", chunk.CreatedAt.Format(time.RFC3339))
+	fmt.Println()
+	fmt.Println(chunk.Text)
 }
 
 func handleConfig() {

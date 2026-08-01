@@ -134,6 +134,13 @@ go-rag list
 go-rag delete <document-id>
 ```
 
+### Inspect Chunks
+
+```bash
+# Get a specific chunk by document ID and chunk index
+go-rag get-chunk <document-id> --index 0
+```
+
 ## Common Workflows
 
 ### Setting up a new knowledge base

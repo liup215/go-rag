@@ -43,6 +43,7 @@ type Storage interface {
 	DeleteDocument(id string) error
 	CreateChunk(chunk *Chunk) error
 	CreateChunks(chunks []Chunk) error
+	GetChunkByIndex(docID string, index int) (*Chunk, error)
 	GetChunksByDocument(docID string) ([]Chunk, error)
 	GetAllChunks() ([]Chunk, error)
 	SearchByKeyword(query string, limit int) ([]Chunk, error)
