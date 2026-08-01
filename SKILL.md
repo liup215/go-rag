@@ -141,6 +141,23 @@ go-rag delete <document-id>
 go-rag get-chunk <document-id> --index 0
 ```
 
+#### Reading context around search results
+
+When `go-rag search` returns a relevant chunk, the surrounding chunks often contain important context — for example, definitions, tables, diagrams, or chapter summaries. Always retrieve nearby chunks by adjusting the chunk index up and down.
+
+```bash
+# 1. Search and note the Document ID and Chunk number
+go-rag search "prokaryotic cells vs eukaryotic cells"
+
+# 2. Retrieve the matching chunk and its neighbors
+go-rag get-chunk <document-id> --index 43
+go-rag get-chunk <document-id> --index 44
+go-rag get-chunk <document-id> --index 45
+go-rag get-chunk <document-id> --index 46
+```
+
+This is especially useful for textbooks and long documents where a single chunk may start or end in the middle of a table or section.
+
 ## Common Workflows
 
 ### Setting up a new knowledge base
