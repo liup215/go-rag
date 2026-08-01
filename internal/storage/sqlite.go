@@ -327,6 +327,27 @@ func (s *SQLiteStorage) CreateChunks(chunks []Chunk) error {
 	return s.sendWriteOp(writeOp{opType: opCreateChunks, payload: chunks})
 }
 
+// GetChunkByIndex retrieves a single chunk by document ID and chunk index.
+func (s *SQLiteStorage) GetChunkByIndex(docID string, index int) (*Chunk, error) {
+	row := s.db.QueryRow(`
+		SELECT id, document_id, text, chunk_index, embedding, created_at
+		FROM chunks WHERE document_id = ? AND chunk_index = ?`, docID, index)
+
+	var chunk Chunk
+	var emb []byte
+	err := row.Scan(&chunk.ID, &chunk.DocumentID, &chunk.Text, &chunk.Index, &emb, &chunk.CreatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if len(emb) > 0 {
+		chunk.Embedding = bytesToFloat32s(emb)
+	}
+	return &chunk, nil
+}
+
 // GetChunksByDocument retrieves all chunks for a document
 func (s *SQLiteStorage) GetChunksByDocument(docID string) ([]Chunk, error) {
 	rows, err := s.db.Query(`

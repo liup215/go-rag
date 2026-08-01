@@ -80,6 +80,12 @@ go-rag search "project requirements" --top-k 10
 go-rag search "budget analysis" --threshold 0.7
 ```
 
+### 5. Get a specific chunk
+
+```bash
+go-rag get-chunk <doc-id> --index 3
+```
+
 ## Commands
 
 | Command | Description |
@@ -89,6 +95,7 @@ go-rag search "budget analysis" --threshold 0.7
 | `search <query>` | Search the knowledge base |
 | `list` | List all documents |
 | `delete <doc-id>` | Delete a document |
+| `get-chunk <doc-id>` | Get a chunk by document ID and index |
 | `config set <key> <value>` | Set a configuration value |
 | `config get <key>` | Get a configuration value |
 | `config list` | List all configuration |
