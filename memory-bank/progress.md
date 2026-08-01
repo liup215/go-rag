@@ -12,7 +12,7 @@
 - Potential enhancements driven by user feedback (e.g., chunk ranges, JSON output, chunk deletion).
 
 ## Current status
-- Version: v0.2.0 released (tag `v0.2.0`).
+- Version: v0.2.1 released (tag `v0.2.1`).
 - All tests pass and the binary builds successfully.
 
 ## Known issues
