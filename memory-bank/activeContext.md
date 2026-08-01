@@ -11,7 +11,6 @@ Recently added the `get-chunk` command to retrieve a single chunk by document ID
 - Updated retriever test mock storage to satisfy the extended interface.
 
 ## Next steps
-- Commit, push, and tag the release.
 - Consider future enhancements: chunk ranges, JSON output, or chunk-level deletion.
 
 ## Active decisions
