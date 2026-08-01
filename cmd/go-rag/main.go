@@ -20,7 +20,7 @@ import (
 	"github.com/liup215/go-rag/pkg/config"
 )
 
-const version = "v0.2.1"
+const version = "v0.2.2"
 
 // reorderArgs moves flags (and their values) before positional arguments.
 // The standard flag package stops parsing at the first non-flag argument,
@@ -118,12 +118,19 @@ func printUsage() {
 }
 
 func handleInit() {
+	configPath := config.ConfigPath()
+	if _, err := os.Stat(configPath); err == nil {
+		fmt.Println("Configuration already initialized.")
+		fmt.Printf("Config file: %s\n", configPath)
+		return
+	}
+
 	if err := config.Init(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 	fmt.Println("Configuration initialized.")
-	fmt.Printf("Config file: %s\n", config.ConfigPath())
+	fmt.Printf("Config file: %s\n", configPath)
 }
 
 func handleAdd() {

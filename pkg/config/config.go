@@ -166,8 +166,12 @@ func (c *Config) Save() error {
 	return nil
 }
 
-// Init initializes a new configuration file
+// Init initializes a new configuration file. If the config file already
+// exists, it returns nil without modifying the existing configuration.
 func Init() error {
+	if _, err := os.Stat(ConfigPath()); err == nil {
+		return nil
+	}
 	config := DefaultConfig()
 	return config.Save()
 }
