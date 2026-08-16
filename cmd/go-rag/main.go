@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -70,6 +71,8 @@ func main() {
 		handleConfig()
 	case "config-help":
 		printConfigHelp()
+	case "wiki":
+		handleWiki()
 	case "version", "-v", "--version":
 		fmt.Println("go-rag version", version)
 	case "help", "-h", "--help":
@@ -105,6 +108,15 @@ func printUsage() {
 	fmt.Println("    get <key>                     Get a configuration value")
 	fmt.Println("    list                          List all configuration")
 	fmt.Println("    help                          Show available configuration options")
+	fmt.Println("  wiki <subcommand>     Personal wiki commands")
+	fmt.Println("    index-list                  List wiki indexes (topics)")
+	fmt.Println("    index-create <title>        Create a wiki index")
+	fmt.Println("    index-delete <index-id>     Delete a wiki index")
+	fmt.Println("    remember <index-id> <title> Create a wiki entry")
+	fmt.Println("    list <index-id>             List entries in an index")
+	fmt.Println("    get <entry-id>              Show a wiki entry body")
+	fmt.Println("    update <entry-id>           Update a wiki entry")
+	fmt.Println("    forget <entry-id>           Delete a wiki entry")
 	fmt.Println("  version                 Show version")
 	fmt.Println("  help                    Show this help")
 	fmt.Println()
@@ -753,4 +765,473 @@ func printConfigHelp() {
 // Helper function for string conversion
 func strconvParseFloat(s string, bitSize int) (float64, error) {
 	return strconv.ParseFloat(s, bitSize)
+}
+
+// ---- Wiki commands -------------------------------------------------------
+
+func printWikiUsage() {
+	fmt.Println("go-rag wiki - Personal wiki commands")
+	fmt.Println()
+	fmt.Println("Usage:")
+	fmt.Println("  go-rag wiki <subcommand> [options]")
+	fmt.Println()
+	fmt.Println("Subcommands:")
+	fmt.Println("  index-list                          List all wiki indexes (topics)")
+	fmt.Println("  index-create <title>                Create a new wiki index")
+	fmt.Println("    --description <text>              Optional index description")
+	fmt.Println("  index-delete <index-id>             Delete a wiki index and its entries")
+	fmt.Println("  remember <index-id> <title>         Create a wiki entry under an index")
+	fmt.Println("    --body <text>                     Entry body")
+	fmt.Println("    --file <path>                     Entry body from file")
+	fmt.Println("  list <index-id>                     List entries in an index")
+	fmt.Println("  get <entry-id>                      Show full body of a wiki entry")
+	fmt.Println("  update <entry-id>                   Update a wiki entry")
+	fmt.Println("    --title <text>                    New title")
+	fmt.Println("    --file <path>                     New body from file")
+	fmt.Println("  export <entry-id> --file <path>     Export entry body to a file")
+	fmt.Println("  forget <entry-id>                   Delete a wiki entry")
+	fmt.Println("  help                                Show this help")
+	fmt.Println()
+	fmt.Println("Examples:")
+	fmt.Println("  go-rag wiki index-create Architecture --description 'Design decisions'")
+	fmt.Println("  go-rag wiki remember <index-id> 'SQLite decision' --body 'We chose SQLite WAL'")
+	fmt.Println("  go-rag wiki remember <index-id> 'SQLite decision' --file ./sqlite-wal.md")
+	fmt.Println("  go-rag wiki export <entry-id> --file ./draft.md")
+	fmt.Println("  go-rag wiki update <entry-id> --file ./draft.md")
+	fmt.Println("  go-rag wiki list <index-id>")
+	fmt.Println("  go-rag wiki get <entry-id>")
+}
+
+func handleWiki() {
+	if len(os.Args) < 3 {
+		printWikiUsage()
+		os.Exit(1)
+	}
+
+	subcommand := os.Args[2]
+	switch subcommand {
+	case "index-list":
+		handleWikiIndexList()
+	case "index-create":
+		handleWikiIndexCreate()
+	case "index-delete":
+		handleWikiIndexDelete()
+	case "remember":
+		handleWikiRemember()
+	case "list":
+		handleWikiList()
+	case "get":
+		handleWikiGet()
+	case "update":
+		handleWikiUpdate()
+	case "export":
+		handleWikiExport()
+	case "forget":
+		handleWikiForget()
+	case "help", "-h", "--help":
+		printWikiUsage()
+	default:
+		fmt.Fprintf(os.Stderr, "Unknown wiki subcommand: %s\n", subcommand)
+		printWikiUsage()
+		os.Exit(1)
+	}
+}
+
+func loadWikiStore() (*config.Config, storage.Storage, error) {
+	cfg, err := config.Load()
+	if err != nil {
+		return nil, nil, fmt.Errorf("loading config: %w", err)
+	}
+	store, err := storage.NewStorage(cfg.Storage.Path)
+	if err != nil {
+		return nil, nil, fmt.Errorf("opening storage: %w", err)
+	}
+	return cfg, store, nil
+}
+
+func readStdinIfAvailable() string {
+	stat, err := os.Stdin.Stat()
+	if err != nil {
+		return ""
+	}
+	if stat.Mode()&os.ModeCharDevice != 0 {
+		return ""
+	}
+	data, err := io.ReadAll(os.Stdin)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
+}
+
+func handleWikiIndexList() {
+	_, store, err := loadWikiStore()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	defer store.Close()
+
+	indexes, err := store.ListWikiIndexes()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error listing indexes: %v\n", err)
+		os.Exit(1)
+	}
+
+	if len(indexes) == 0 {
+		fmt.Println("No wiki indexes found.")
+		return
+	}
+
+	fmt.Printf("%-36s %-20s %s\n", "ID", "Title", "Description")
+	fmt.Println(strings.Repeat("-", 100))
+	for _, idx := range indexes {
+		title := truncateString(idx.Title, 18)
+		desc := truncateString(idx.Description, 40)
+		fmt.Printf("%-36s %-20s %s\n", idx.ID, title, desc)
+	}
+	fmt.Printf("\nTotal: %d indexes\n", len(indexes))
+}
+
+func handleWikiIndexCreate() {
+	fs := flag.NewFlagSet("index-create", flag.ExitOnError)
+	description := fs.String("description", "", "Index description")
+	fs.Parse(reorderArgs(os.Args[3:]))
+
+	if fs.NArg() < 1 {
+		fmt.Fprintf(os.Stderr, "Error: title required\n")
+		fmt.Fprintf(os.Stderr, "Usage: go-rag wiki index-create <title> [--description <text>]\n")
+		os.Exit(1)
+	}
+
+	_, store, err := loadWikiStore()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	defer store.Close()
+
+	idx := &storage.WikiIndex{
+		Title:       fs.Arg(0),
+		Description: *description,
+	}
+	if err := store.CreateWikiIndex(idx); err != nil {
+		fmt.Fprintf(os.Stderr, "Error creating index: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Created index: %s\n", idx.ID)
+}
+
+func handleWikiIndexDelete() {
+	if len(os.Args) < 4 {
+		fmt.Fprintf(os.Stderr, "Error: index ID required\n")
+		fmt.Fprintf(os.Stderr, "Usage: go-rag wiki index-delete <index-id>\n")
+		os.Exit(1)
+	}
+
+	_, store, err := loadWikiStore()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	defer store.Close()
+
+	id := os.Args[3]
+	if err := store.DeleteWikiIndex(id); err != nil {
+		fmt.Fprintf(os.Stderr, "Error deleting index: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Println("Index deleted successfully.")
+}
+
+func handleWikiRemember() {
+	fs := flag.NewFlagSet("remember", flag.ExitOnError)
+	bodyFlag := fs.String("body", "", "Entry body")
+	fileFlag := fs.String("file", "", "Path to file containing entry body")
+	fs.Parse(reorderArgs(os.Args[3:]))
+
+	if fs.NArg() < 2 {
+		fmt.Fprintf(os.Stderr, "Error: index ID and title required\n")
+		fmt.Fprintf(os.Stderr, "Usage: go-rag wiki remember <index-id> <title> [--body <text> | --file <path>]\n")
+		os.Exit(1)
+	}
+
+	indexID := strings.TrimSpace(fs.Arg(0))
+	title := strings.TrimSpace(fs.Arg(1))
+	if indexID == "" {
+		fmt.Fprintf(os.Stderr, "Error: index ID required\n")
+		os.Exit(1)
+	}
+	if title == "" {
+		fmt.Fprintf(os.Stderr, "Error: entry title required\n")
+		os.Exit(1)
+	}
+
+	if *bodyFlag != "" && *fileFlag != "" {
+		fmt.Fprintf(os.Stderr, "Error: cannot use both --body and --file\n")
+		os.Exit(1)
+	}
+
+	body := ""
+	if *bodyFlag != "" {
+		body = strings.TrimSpace(*bodyFlag)
+	} else if *fileFlag != "" {
+		data, err := os.ReadFile(*fileFlag)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: cannot read file: %v\n", err)
+			os.Exit(1)
+		}
+		body = strings.TrimSpace(string(data))
+	}
+	if body == "" {
+		fmt.Fprintf(os.Stderr, "Error: entry body required (use --body or --file)\n")
+		os.Exit(1)
+	}
+
+	_, store, err := loadWikiStore()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	defer store.Close()
+
+	idx, err := store.GetWikiIndex(indexID)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error checking index: %v\n", err)
+		os.Exit(1)
+	}
+	if idx == nil {
+		fmt.Fprintf(os.Stderr, "Error: index %s not found\n", indexID)
+		os.Exit(1)
+	}
+
+	entry := &storage.WikiEntry{
+		IndexID: indexID,
+		Title:   title,
+		Body:    body,
+	}
+	if err := store.CreateWikiEntry(entry); err != nil {
+		fmt.Fprintf(os.Stderr, "Error creating wiki entry: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Created wiki entry: %s\n", entry.ID)
+}
+
+func handleWikiList() {
+	if len(os.Args) < 4 {
+		fmt.Fprintf(os.Stderr, "Error: index ID required\n")
+		fmt.Fprintf(os.Stderr, "Usage: go-rag wiki list <index-id>\n")
+		os.Exit(1)
+	}
+
+	indexID := os.Args[3]
+	_, store, err := loadWikiStore()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	defer store.Close()
+
+	idx, err := store.GetWikiIndex(indexID)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error checking index: %v\n", err)
+		os.Exit(1)
+	}
+	if idx == nil {
+		fmt.Fprintf(os.Stderr, "Error: index %s not found\n", indexID)
+		os.Exit(1)
+	}
+
+	entries, err := store.ListWikiEntries(indexID)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error listing entries: %v\n", err)
+		os.Exit(1)
+	}
+
+	if len(entries) == 0 {
+		fmt.Println("No entries found in this index.")
+		return
+	}
+
+	fmt.Printf("Index: %s\n\n", idx.Title)
+	fmt.Printf("%-36s %-20s %s\n", "ID", "Created", "Title")
+	fmt.Println(strings.Repeat("-", 100))
+	for _, entry := range entries {
+		title := truncateString(entry.Title, 30)
+		fmt.Printf("%-36s %-20s %s\n", entry.ID, entry.CreatedAt.Format(time.RFC3339), title)
+	}
+	fmt.Printf("\nTotal: %d entries\n", len(entries))
+}
+
+func handleWikiGet() {
+	if len(os.Args) < 4 {
+		fmt.Fprintf(os.Stderr, "Error: entry ID required\n")
+		fmt.Fprintf(os.Stderr, "Usage: go-rag wiki get <entry-id>\n")
+		os.Exit(1)
+	}
+
+	entryID := os.Args[3]
+	_, store, err := loadWikiStore()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	defer store.Close()
+
+	entry, err := store.GetWikiEntry(entryID)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error getting entry: %v\n", err)
+		os.Exit(1)
+	}
+	if entry == nil {
+		fmt.Fprintf(os.Stderr, "Error: entry %s not found\n", entryID)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Entry ID: %s\n", entry.ID)
+	fmt.Printf("Index ID: %s\n", entry.IndexID)
+	fmt.Printf("Title:    %s\n", entry.Title)
+	fmt.Printf("Created:  %s\n", entry.CreatedAt.Format(time.RFC3339))
+	fmt.Printf("Updated:  %s\n", entry.UpdatedAt.Format(time.RFC3339))
+	fmt.Println()
+	fmt.Println(entry.Body)
+}
+
+func handleWikiUpdate() {
+	fs := flag.NewFlagSet("update", flag.ExitOnError)
+	titleFlag := fs.String("title", "", "New title")
+	fileFlag := fs.String("file", "", "Path to file containing new body")
+	fs.Parse(reorderArgs(os.Args[3:]))
+
+	if fs.NArg() < 1 {
+		fmt.Fprintf(os.Stderr, "Error: entry ID required\n")
+		fmt.Fprintf(os.Stderr, "Usage: go-rag wiki update <entry-id> [--title <text>] [--file <path>]\n")
+		os.Exit(1)
+	}
+
+	entryID := fs.Arg(0)
+	_, store, err := loadWikiStore()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	defer store.Close()
+
+	entry, err := store.GetWikiEntry(entryID)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error getting entry: %v\n", err)
+		os.Exit(1)
+	}
+	if entry == nil {
+		fmt.Fprintf(os.Stderr, "Error: entry %s not found\n", entryID)
+		os.Exit(1)
+	}
+
+	updated := false
+	if *titleFlag != "" {
+		entry.Title = strings.TrimSpace(*titleFlag)
+		updated = true
+	}
+	if *fileFlag != "" {
+		data, err := os.ReadFile(*fileFlag)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: cannot read file: %v\n", err)
+			os.Exit(1)
+		}
+		body := strings.TrimSpace(string(data))
+		if body == "" {
+			fmt.Fprintf(os.Stderr, "Error: entry body cannot be empty\n")
+			os.Exit(1)
+		}
+		entry.Body = body
+		updated = true
+	}
+	if !updated {
+		fmt.Fprintf(os.Stderr, "Error: nothing to update (use --title or --file)\n")
+		os.Exit(1)
+	}
+
+	if err := store.UpdateWikiEntry(entry); err != nil {
+		fmt.Fprintf(os.Stderr, "Error updating entry: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Println("Entry updated successfully.")
+}
+
+func handleWikiExport() {
+	fs := flag.NewFlagSet("export", flag.ExitOnError)
+	fileFlag := fs.String("file", "", "Path to write entry body")
+	fs.Parse(reorderArgs(os.Args[3:]))
+
+	if fs.NArg() < 1 {
+		fmt.Fprintf(os.Stderr, "Error: entry ID required\n")
+		fmt.Fprintf(os.Stderr, "Usage: go-rag wiki export <entry-id> --file <path>\n")
+		os.Exit(1)
+	}
+	if *fileFlag == "" {
+		fmt.Fprintf(os.Stderr, "Error: --file is required\n")
+		os.Exit(1)
+	}
+
+	entryID := fs.Arg(0)
+	_, store, err := loadWikiStore()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	defer store.Close()
+
+	entry, err := store.GetWikiEntry(entryID)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error getting entry: %v\n", err)
+		os.Exit(1)
+	}
+	if entry == nil {
+		fmt.Fprintf(os.Stderr, "Error: entry %s not found\n", entryID)
+		os.Exit(1)
+	}
+
+	if err := os.WriteFile(*fileFlag, []byte(entry.Body), 0644); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: cannot write file: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Exported entry to %s\n", *fileFlag)
+}
+
+func handleWikiForget() {
+	if len(os.Args) < 4 {
+		fmt.Fprintf(os.Stderr, "Error: entry ID required\n")
+		fmt.Fprintf(os.Stderr, "Usage: go-rag wiki forget <entry-id>\n")
+		os.Exit(1)
+	}
+
+	entryID := os.Args[3]
+	_, store, err := loadWikiStore()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	defer store.Close()
+
+	if err := store.DeleteWikiEntry(entryID); err != nil {
+		fmt.Fprintf(os.Stderr, "Error deleting entry: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Println("Entry deleted successfully.")
+}
+
+func truncateString(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	if maxLen <= 3 {
+		return s[:maxLen]
+	}
+	return s[:maxLen-3] + "..."
 }

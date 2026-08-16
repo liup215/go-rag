@@ -16,9 +16,19 @@
 cmd/go-rag/main.go
   -> config.Load
   -> storage.NewStorage
-  -> chunker / parser / embedder / retriever
+  -> chunker / parser / embedder / retriever / wiki
 ```
+
+## Wiki subsystem pattern
+The personal wiki ("wiki") is intentionally separate from the RAG pipeline:
+- **Tables**: `wiki_indexes` (topics) and `wiki_entries` (full text).
+- **Truth source**: SQLite rows, not Markdown files.
+- **Index management**: The external agent decides how indexes are organized and updates them explicitly.
+- **Recall flow**: `index-list` → `list <index-id>` → `get <entry-id>`.
+- **No embeddings**: Retrieval is symbolic; no chunking or vector search is required.
+- **File-based body workflow**: `remember` and `update --file` read body from a file; `export` writes body to a file. This lets users edit large bodies with any editor while keeping SQLite as the truth source.
 
 ## Critical implementation paths
 - Adding a storage query requires updating the interface, SQLite implementation, and any mock implementations.
 - CLI flags use `flag.NewFlagSet` plus `reorderArgs` to allow flags after positional arguments.
+- Wiki deletion cascades manually in a SQLite transaction to avoid relying on per-connection foreign-key pragma state.

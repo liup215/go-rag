@@ -7,17 +7,21 @@
 - Document listing and deletion.
 - Chunk lookup by document ID and index (`get-chunk`).
 - SQLite storage with WAL mode and serialized writes.
+- Agent-managed personal wiki (`go-rag wiki`):
+  - Topic indexes (`wiki_indexes`)
+  - Full-text wiki entries (`wiki_entries`)
+  - Symbolic recall workflow: index-list → list → get
+  - File-based body create/update/export workflow
 
 ## What's left to build
-- Potential enhancements driven by user feedback (e.g., chunk ranges, JSON output, chunk deletion).
+- Potential enhancements driven by user feedback (e.g., chunk ranges, JSON output, chunk deletion, wiki tags/date filters).
 
 ## Current status
 - Version: v0.2.2 released (tag `v0.2.2`).
-- All tests pass and the binary builds successfully.
+- Wiki feature implemented and tested; all tests pass and the binary builds successfully.
 
 ## Known issues
 - Document ingestion requires a configured embedding API key; local no-embedding mode is not supported.
-- README still mentions "JSON storage" in the feature list while the actual storage is SQLite.
 
 ## Recent fixes
 - `init` command no longer overwrites an existing `config.yaml`; it reports "Configuration already initialized." instead.

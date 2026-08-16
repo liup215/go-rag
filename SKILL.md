@@ -158,6 +158,78 @@ go-rag get-chunk <document-id> --index 46
 
 This is especially useful for textbooks and long documents where a single chunk may start or end in the middle of a table or section.
 
+### Personal Wiki
+
+Use `go-rag wiki` for agent-managed symbolic memory. This is different from RAG search:
+- Wiki stores complete entries in SQLite.
+- Indexes (topics) are created and maintained by the agent.
+- Recall is symbolic: index → entry summary → full entry.
+
+Create an index:
+
+```bash
+go-rag wiki index-create "Architecture" --description "Design decisions"
+```
+
+Remember an entry:
+
+```bash
+# Quick note via --body
+go-rag wiki remember <index-id> "SQLite WAL decision" \
+  --body "We chose SQLite WAL mode to avoid SQLITE_BUSY errors."
+
+# Longer content from a file
+go-rag wiki remember <index-id> "SQLite WAL decision" --file ./sqlite-wal.md
+```
+
+`--body` and `--file` are mutually exclusive; you must provide exactly one of them.
+
+Recall workflow:
+
+```bash
+# 1. List indexes
+go-rag wiki index-list
+
+# 2. List summaries in the chosen index
+go-rag wiki list <index-id>
+
+# 3. Read the full entry
+go-rag wiki get <entry-id>
+```
+
+Update an entry:
+
+To modify an entry body, always export it first, edit the file, then re-import:
+
+```bash
+# 1. Export the body to a file
+go-rag wiki export <entry-id> --file ./draft.md
+
+# 2. Edit draft.md with any editor
+
+# 3. Re-import the file
+go-rag wiki update <entry-id> --file ./draft.md
+```
+
+You can also update only the title:
+
+```bash
+go-rag wiki update <entry-id> --title "New title"
+```
+
+Or update both at once:
+
+```bash
+go-rag wiki update <entry-id> --title "New title" --file ./draft.md
+```
+
+Delete:
+
+```bash
+go-rag wiki forget <entry-id>
+go-rag wiki index-delete <index-id>
+```
+
 ## Common Workflows
 
 ### Setting up a new knowledge base

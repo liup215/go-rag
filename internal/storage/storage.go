@@ -33,6 +33,25 @@ type SearchResult struct {
 	Score float64 `json:"score"`
 }
 
+// WikiIndex represents a topic/category index in the personal wiki.
+type WikiIndex struct {
+	ID          string    `json:"id"`
+	Title       string    `json:"title"`
+	Description string    `json:"description"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+// WikiEntry represents a single wiki item under a WikiIndex.
+type WikiEntry struct {
+	ID        string    `json:"id"`
+	IndexID   string    `json:"index_id"`
+	Title     string    `json:"title"`
+	Body      string    `json:"body"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
 // Storage defines the interface for storage implementations
 type Storage interface {
 	Close() error
@@ -47,6 +66,19 @@ type Storage interface {
 	GetChunksByDocument(docID string) ([]Chunk, error)
 	GetAllChunks() ([]Chunk, error)
 	SearchByKeyword(query string, limit int) ([]Chunk, error)
+
+	// Wiki index management.
+	CreateWikiIndex(idx *WikiIndex) error
+	GetWikiIndex(id string) (*WikiIndex, error)
+	ListWikiIndexes() ([]WikiIndex, error)
+	DeleteWikiIndex(id string) error
+
+	// Wiki entry management.
+	CreateWikiEntry(entry *WikiEntry) error
+	GetWikiEntry(id string) (*WikiEntry, error)
+	ListWikiEntries(indexID string) ([]WikiEntry, error)
+	UpdateWikiEntry(entry *WikiEntry) error
+	DeleteWikiEntry(id string) error
 }
 
 // NewStorage creates a new storage instance (defaults to SQLite)

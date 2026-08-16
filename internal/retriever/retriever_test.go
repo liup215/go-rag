@@ -47,6 +47,17 @@ func (m *mockStorage) GetAllChunks() ([]storage.Chunk, error) {
 func (m *mockStorage) SearchByKeyword(query string, limit int) ([]storage.Chunk, error) {
 	return m.chunks, nil
 }
+func (m *mockStorage) CreateWikiIndex(idx *storage.WikiIndex) error         { return nil }
+func (m *mockStorage) GetWikiIndex(id string) (*storage.WikiIndex, error)   { return nil, nil }
+func (m *mockStorage) ListWikiIndexes() ([]storage.WikiIndex, error)        { return nil, nil }
+func (m *mockStorage) DeleteWikiIndex(id string) error                        { return nil }
+func (m *mockStorage) CreateWikiEntry(entry *storage.WikiEntry) error       { return nil }
+func (m *mockStorage) GetWikiEntry(id string) (*storage.WikiEntry, error)   { return nil, nil }
+func (m *mockStorage) ListWikiEntries(indexID string) ([]storage.WikiEntry, error) {
+	return nil, nil
+}
+func (m *mockStorage) UpdateWikiEntry(entry *storage.WikiEntry) error { return nil }
+func (m *mockStorage) DeleteWikiEntry(id string) error                  { return nil }
 
 // mockEmbedder returns a fixed embedding for any input.
 type mockEmbedder struct {
