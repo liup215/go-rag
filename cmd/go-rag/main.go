@@ -21,7 +21,7 @@ import (
 	"github.com/liup215/go-rag/pkg/config"
 )
 
-const version = "v0.2.2"
+const version = "v0.3.0"
 
 // reorderArgs moves flags (and their values) before positional arguments.
 // The standard flag package stops parsing at the first non-flag argument,

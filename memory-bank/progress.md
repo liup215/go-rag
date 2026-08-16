@@ -17,7 +17,7 @@
 - Potential enhancements driven by user feedback (e.g., chunk ranges, JSON output, chunk deletion, wiki tags/date filters).
 
 ## Current status
-- Version: v0.2.2 released (tag `v0.2.2`).
+- Version: v0.3.0 released (tag `v0.3.0`).
 - Wiki feature implemented and tested; all tests pass and the binary builds successfully.
 
 ## Known issues
