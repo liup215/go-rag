@@ -22,6 +22,11 @@ const (
 	opDeleteDocument
 	opCreateChunk
 	opCreateChunks
+	opCreateWikiIndex
+	opDeleteWikiIndex
+	opCreateWikiEntry
+	opUpdateWikiEntry
+	opDeleteWikiEntry
 )
 
 // writeOp represents a single database write request sent to the worker.
@@ -50,7 +55,7 @@ func NewSQLiteStorage(dbPath string) (*SQLiteStorage, error) {
 	}
 
 	// Open database with WAL mode for better concurrency
-	db, err := sql.Open("sqlite", dbPath+"?_journal=WAL&_busy_timeout=5000&_foreign_keys=1")
+	db, err := sql.Open("sqlite", dbPath+"?_journal=WAL&_busy_timeout=5000&_fk=1")
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
@@ -115,6 +120,23 @@ func createTables(db *sql.DB) error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_chunks_doc ON chunks(document_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_chunks_index ON chunks(document_id, chunk_index)`,
+		`CREATE TABLE IF NOT EXISTS wiki_indexes (
+			id TEXT PRIMARY KEY,
+			title TEXT NOT NULL,
+			description TEXT,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE TABLE IF NOT EXISTS wiki_entries (
+			id TEXT PRIMARY KEY,
+			index_id TEXT NOT NULL,
+			title TEXT NOT NULL,
+			body TEXT NOT NULL,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			FOREIGN KEY (index_id) REFERENCES wiki_indexes(id) ON DELETE CASCADE
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_wiki_entries_index ON wiki_entries(index_id)`,
 	}
 
 	for _, stmt := range stmts {
@@ -231,6 +253,54 @@ func (s *SQLiteStorage) execWriteOp(op writeOp) error {
 			}
 		}
 		return tx.Commit()
+
+	case opCreateWikiIndex:
+		idx := op.payload.(*WikiIndex)
+		_, err := s.db.Exec(`
+			INSERT INTO wiki_indexes (id, title, description, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?)`,
+			idx.ID, idx.Title, idx.Description, idx.CreatedAt, idx.UpdatedAt,
+		)
+		return err
+
+	case opDeleteWikiIndex:
+		id := op.payload.(string)
+		// Delete entries first, then the index, within a single transaction.
+		// This avoids relying on per-connection foreign key pragma settings.
+		tx, err := s.db.Begin()
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback()
+		if _, err := tx.Exec(`DELETE FROM wiki_entries WHERE index_id = ?`, id); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`DELETE FROM wiki_indexes WHERE id = ?`, id); err != nil {
+			return err
+		}
+		return tx.Commit()
+
+	case opCreateWikiEntry:
+		entry := op.payload.(*WikiEntry)
+		_, err := s.db.Exec(`
+			INSERT INTO wiki_entries (id, index_id, title, body, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?)`,
+			entry.ID, entry.IndexID, entry.Title, entry.Body, entry.CreatedAt, entry.UpdatedAt,
+		)
+		return err
+
+	case opUpdateWikiEntry:
+		entry := op.payload.(*WikiEntry)
+		_, err := s.db.Exec(`
+			UPDATE wiki_entries SET title = ?, body = ?, updated_at = ? WHERE id = ?`,
+			entry.Title, entry.Body, entry.UpdatedAt, entry.ID,
+		)
+		return err
+
+	case opDeleteWikiEntry:
+		id := op.payload.(string)
+		_, err := s.db.Exec(`DELETE FROM wiki_entries WHERE id = ?`, id)
+		return err
 
 	default:
 		return fmt.Errorf("unknown write operation: %d", op.opType)
@@ -427,6 +497,121 @@ func (s *SQLiteStorage) SearchByKeyword(query string, limit int) ([]Chunk, error
 		chunks = append(chunks, chunk)
 	}
 	return chunks, rows.Err()
+}
+
+// ---- Wiki index methods --------------------------------------------------
+
+// CreateWikiIndex creates a new wiki index.
+func (s *SQLiteStorage) CreateWikiIndex(idx *WikiIndex) error {
+	if idx.ID == "" {
+		idx.ID = uuid.NewString()
+	}
+	now := time.Now().UTC()
+	idx.CreatedAt = now
+	idx.UpdatedAt = now
+	return s.sendWriteOp(writeOp{opType: opCreateWikiIndex, payload: idx})
+}
+
+// GetWikiIndex retrieves a wiki index by ID.
+func (s *SQLiteStorage) GetWikiIndex(id string) (*WikiIndex, error) {
+	row := s.db.QueryRow(`
+		SELECT id, title, description, created_at, updated_at
+		FROM wiki_indexes WHERE id = ?`, id)
+
+	var idx WikiIndex
+	err := row.Scan(&idx.ID, &idx.Title, &idx.Description, &idx.CreatedAt, &idx.UpdatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	return &idx, err
+}
+
+// ListWikiIndexes lists all wiki indexes ordered by title.
+func (s *SQLiteStorage) ListWikiIndexes() ([]WikiIndex, error) {
+	rows, err := s.db.Query(`
+		SELECT id, title, description, created_at, updated_at
+		FROM wiki_indexes ORDER BY title`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var indexes []WikiIndex
+	for rows.Next() {
+		var idx WikiIndex
+		if err := rows.Scan(&idx.ID, &idx.Title, &idx.Description, &idx.CreatedAt, &idx.UpdatedAt); err != nil {
+			continue
+		}
+		indexes = append(indexes, idx)
+	}
+	return indexes, rows.Err()
+}
+
+// DeleteWikiIndex deletes a wiki index and all its entries.
+func (s *SQLiteStorage) DeleteWikiIndex(id string) error {
+	return s.sendWriteOp(writeOp{opType: opDeleteWikiIndex, payload: id})
+}
+
+// ---- Wiki entry methods --------------------------------------------------
+
+// CreateWikiEntry creates a new wiki entry.
+func (s *SQLiteStorage) CreateWikiEntry(entry *WikiEntry) error {
+	if entry.ID == "" {
+		entry.ID = uuid.NewString()
+	}
+	now := time.Now().UTC()
+	entry.CreatedAt = now
+	entry.UpdatedAt = now
+	return s.sendWriteOp(writeOp{opType: opCreateWikiEntry, payload: entry})
+}
+
+// GetWikiEntry retrieves a wiki entry by ID.
+func (s *SQLiteStorage) GetWikiEntry(id string) (*WikiEntry, error) {
+	row := s.db.QueryRow(`
+		SELECT id, index_id, title, body, created_at, updated_at
+		FROM wiki_entries WHERE id = ?`, id)
+
+	var entry WikiEntry
+	err := row.Scan(&entry.ID, &entry.IndexID, &entry.Title, &entry.Body, &entry.CreatedAt, &entry.UpdatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	return &entry, err
+}
+
+// ListWikiEntries lists all wiki entries under an index.
+func (s *SQLiteStorage) ListWikiEntries(indexID string) ([]WikiEntry, error) {
+	rows, err := s.db.Query(`
+		SELECT id, index_id, title, body, created_at, updated_at
+		FROM wiki_entries WHERE index_id = ? ORDER BY created_at DESC`, indexID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var entries []WikiEntry
+	for rows.Next() {
+		var entry WikiEntry
+		if err := rows.Scan(&entry.ID, &entry.IndexID, &entry.Title, &entry.Body, &entry.CreatedAt, &entry.UpdatedAt); err != nil {
+			continue
+		}
+		entries = append(entries, entry)
+	}
+	return entries, rows.Err()
+}
+
+// UpdateWikiEntry updates a wiki entry's title and body.
+func (s *SQLiteStorage) UpdateWikiEntry(entry *WikiEntry) error {
+	if entry.ID == "" {
+		return fmt.Errorf("entry id is required")
+	}
+	entry.UpdatedAt = time.Now().UTC()
+	return s.sendWriteOp(writeOp{opType: opUpdateWikiEntry, payload: entry})
+}
+
+// DeleteWikiEntry deletes a wiki entry.
+func (s *SQLiteStorage) DeleteWikiEntry(id string) error {
+	return s.sendWriteOp(writeOp{opType: opDeleteWikiEntry, payload: id})
 }
 
 // Helper functions

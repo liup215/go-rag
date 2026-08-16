@@ -9,7 +9,8 @@ A lightweight RAG (Retrieval-Augmented Generation) command line tool written in 
 - **External embedding models** - Compatible with OpenAI, Ollama, and other OpenAI-compatible APIs
 - **Hybrid search** - Vector search + BM25 keyword search fused with Reciprocal Rank Fusion (RRF)
 - **Cross-encoder reranking** - Optional reranking pass using a bge-reranker or compatible API
-- **JSON storage** - Simple file-based storage, no database dependencies
+- **SQLite storage** - Simple local database, no external database dependencies
+- **Personal wiki** - Agent-managed topic indexes with symbolic retrieval
 - **Cross-platform** - Windows, macOS, Linux (amd64, arm64)
 
 ## Installation
@@ -96,10 +97,88 @@ go-rag get-chunk <doc-id> --index 3
 | `list` | List all documents |
 | `delete <doc-id>` | Delete a document |
 | `get-chunk <doc-id>` | Get a chunk by document ID and index |
+| `wiki index-list` | List personal wiki indexes (topics) |
+| `wiki index-create <title>` | Create a personal wiki index |
+| `wiki index-delete <index-id>` | Delete a personal wiki index |
+| `wiki remember <index-id> <title>` | Create a wiki entry under an index |
+| `wiki list <index-id>` | List wiki entries in an index |
+| `wiki get <entry-id>` | Show full body of a wiki entry |
+| `wiki update <entry-id>` | Update a wiki entry |
+| `wiki export <entry-id>` | Export entry body to a file |
+| `wiki forget <entry-id>` | Delete a wiki entry |
 | `config set <key> <value>` | Set a configuration value |
 | `config get <key>` | Get a configuration value |
 | `config list` | List all configuration |
 | `config help` | Show all available configuration options |
+
+## Personal Wiki
+
+go-rag includes a lightweight, agent-managed personal wiki. Unlike the RAG
+pipeline, the wiki system stores complete entries in SQLite and relies on
+**symbolic navigation** through indexes (topics):
+
+1. Agent lists all indexes with `wiki index-list`.
+2. Agent chooses the relevant index and lists its entries with `wiki list <index-id>`.
+3. Agent reads the desired full entry with `wiki get <entry-id>`.
+
+The tool does not generate or maintain the index automatically; the agent is
+responsible for deciding which index an entry belongs to and how entries are
+organized.
+
+### Create an index
+
+```bash
+go-rag wiki index-create "Architecture" --description "Design decisions"
+```
+
+### Remember an entry
+
+```bash
+# Quick note via --body
+go-rag wiki remember <index-id> "SQLite WAL decision" \
+  --body "We chose SQLite WAL mode to avoid SQLITE_BUSY errors."
+
+# Longer content from a file
+go-rag wiki remember <index-id> "SQLite WAL decision" --file ./sqlite-wal.md
+```
+
+`--body` and `--file` are mutually exclusive; you must provide exactly one of them.
+
+### Recall workflow
+
+```bash
+# 1. List indexes
+go-rag wiki index-list
+
+# 2. List entry summaries in the chosen index
+go-rag wiki list <index-id>
+
+# 3. Read the full entry body
+go-rag wiki get <entry-id>
+```
+
+### Update an entry body
+
+Always export the body first, edit the file, then re-import:
+
+```bash
+go-rag wiki export <entry-id> --file ./draft.md
+# edit draft.md
+go-rag wiki update <entry-id> --file ./draft.md
+```
+
+Update only the title:
+
+```bash
+go-rag wiki update <entry-id> --title "Updated title"
+```
+
+### Delete
+
+```bash
+go-rag wiki forget <entry-id>
+go-rag wiki index-delete <index-id>
+```
 
 ## Configuration
 
