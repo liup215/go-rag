@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -346,15 +348,109 @@ func (s *SQLiteStorage) GetDocument(id string) (*Document, error) {
 	return &doc, err
 }
 
-// ListDocuments lists all documents
-func (s *SQLiteStorage) ListDocuments(limit, offset int) ([]Document, error) {
-	if limit <= 0 {
-		limit = 100
+// documentFilterColumns maps supported DocumentQuery filter keys to columns.
+var documentFilterColumns = map[string]string{
+	"status":    "status",
+	"type":      "doc_type",
+	"doc_type":  "doc_type",
+	"name":      "name",
+	"path":      "file_path",
+	"file_path": "file_path",
+}
+
+// escapeLike escapes LIKE wildcard characters so search input is matched literally.
+func escapeLike(s string) string {
+	return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(s)
+}
+
+// buildDocumentWhere builds the WHERE clause and arguments for a DocumentQuery.
+// Filter keys are applied in sorted order so the generated SQL is deterministic.
+func buildDocumentWhere(q DocumentQuery) (string, []interface{}, error) {
+	var conds []string
+	var args []interface{}
+
+	if search := strings.TrimSpace(q.Search); search != "" {
+		// LIKE is case-insensitive for ASCII in SQLite by default.
+		conds = append(conds, `(name LIKE ? ESCAPE '\' OR file_path LIKE ? ESCAPE '\')`)
+		pattern := "%" + escapeLike(search) + "%"
+		args = append(args, pattern, pattern)
 	}
 
-	rows, err := s.db.Query(`
-		SELECT id, name, file_path, doc_type, content_type, status, error, created_at, updated_at
-		FROM documents ORDER BY created_at DESC LIMIT ? OFFSET ?`, limit, offset)
+	keys := make([]string, 0, len(q.Filters))
+	for key := range q.Filters {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	for _, key := range keys {
+		column, ok := documentFilterColumns[key]
+		if !ok {
+			return "", nil, fmt.Errorf("unsupported document filter %q (supported: status, type, name, path)", key)
+		}
+
+		values := q.Filters[key]
+		if len(values) == 0 {
+			continue
+		}
+
+		placeholders := make([]string, len(values))
+		for i, value := range values {
+			placeholders[i] = "?"
+			args = append(args, value)
+		}
+		conds = append(conds, fmt.Sprintf("%s IN (%s)", column, strings.Join(placeholders, ", ")))
+	}
+
+	if len(conds) == 0 {
+		return "", nil, nil
+	}
+	return " WHERE " + strings.Join(conds, " AND "), args, nil
+}
+
+// validateDocumentQuery rejects invalid pagination values.
+func validateDocumentQuery(q DocumentQuery) error {
+	if q.Limit < 0 {
+		return fmt.Errorf("limit must be >= 0, got %d", q.Limit)
+	}
+	if q.Offset < 0 {
+		return fmt.Errorf("offset must be >= 0, got %d", q.Offset)
+	}
+	return nil
+}
+
+// listDocumentSQL builds the SELECT statement for a DocumentQuery.
+func listDocumentSQL(q DocumentQuery) (string, []interface{}, error) {
+	if err := validateDocumentQuery(q); err != nil {
+		return "", nil, err
+	}
+
+	where, args, err := buildDocumentWhere(q)
+	if err != nil {
+		return "", nil, err
+	}
+
+	query := `SELECT id, name, file_path, doc_type, content_type, status, error, created_at, updated_at
+		FROM documents` + where + ` ORDER BY created_at DESC, id DESC`
+	if q.Limit > 0 {
+		query += ` LIMIT ? OFFSET ?`
+		args = append(args, q.Limit, q.Offset)
+	} else if q.Offset > 0 {
+		// LIMIT -1 returns all remaining rows in SQLite while still applying OFFSET.
+		query += ` LIMIT -1 OFFSET ?`
+		args = append(args, q.Offset)
+	}
+	return query, args, nil
+}
+
+// ListDocuments lists documents matching the query, newest first.
+// The id tiebreaker keeps paging deterministic when documents share a timestamp.
+func (s *SQLiteStorage) ListDocuments(query DocumentQuery) ([]Document, error) {
+	sqlQuery, args, err := listDocumentSQL(query)
+	if err != nil {
+		return nil, err
+	}
+
+	rows, err := s.db.Query(sqlQuery, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -371,6 +467,25 @@ func (s *SQLiteStorage) ListDocuments(limit, offset int) ([]Document, error) {
 		docs = append(docs, doc)
 	}
 	return docs, rows.Err()
+}
+
+// CountDocuments returns the number of documents matching the query.
+// Limit and Offset are ignored so callers can report a total.
+func (s *SQLiteStorage) CountDocuments(query DocumentQuery) (int, error) {
+	if err := validateDocumentQuery(query); err != nil {
+		return 0, err
+	}
+
+	where, args, err := buildDocumentWhere(query)
+	if err != nil {
+		return 0, err
+	}
+
+	var count int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM documents`+where, args...).Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
 }
 
 // DeleteDocument deletes a document and its chunks.

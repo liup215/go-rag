@@ -32,3 +32,12 @@ The personal wiki ("wiki") is intentionally separate from the RAG pipeline:
 - Adding a storage query requires updating the interface, SQLite implementation, and any mock implementations.
 - CLI flags use `flag.NewFlagSet` plus `reorderArgs` to allow flags after positional arguments.
 - Wiki deletion cascades manually in a SQLite transaction to avoid relying on per-connection foreign-key pragma state.
+
+## Document listing pattern
+- `storage.DocumentQuery` (`Search`, `Filters`, `Limit`, `Offset`) is the single input for `ListDocuments` and `CountDocuments`.
+- SQL is assembled from a sorted key→column map (`documentFilterColumns`); unknown keys are rejected so bad filters fail loudly.
+- `--search` uses `LIKE` with `\` escaping of `%`, `_`, and `\`; SQLite `LIKE` is case-insensitive for ASCII.
+- The CLI never filters rows itself: it always sends the same query to `CountDocuments` (total) and `ListDocuments` (page), then prints `Showing n of total (offset o)` and a next-page hint.
+- Repeated `--filter key=value` flags accumulate via the `filterFlags` type (a `flag.Value`); repeated keys become SQL `IN` (OR).
+- `resolveListOffset(limit, offset, page)` centralizes pagination math and validation; `page` overrides `offset`, `limit 0` means "no limit" and cannot be paged.
+- Both helpers are pure and unit-tested in `cmd/go-rag/main_test.go`; keep business logic in such helpers rather than inside handlers that call `os.Exit`.

@@ -126,13 +126,40 @@ go-rag search "budget analysis" --threshold 0.7
 
 ### Manage Documents
 
+`go-rag list` is paginated. By default it returns the 100 most recent documents
+plus the total count, so you can tell whether more documents exist. Use
+`--page`, `--offset`, or `--limit 0` (no limit) to see the rest, and use
+`--search` / `--filter` to locate a document without scanning pages.
+
 ```bash
-# List all documents
+# First 100 documents (newest first) and the total count
 go-rag list
+
+# Next page
+go-rag list --page 2
+
+# Everything at once (only for small libraries)
+go-rag list --limit 0
+
+# Find documents by name or file path substring (case-insensitive)
+go-rag list --search report
+
+# Exact-match filters, repeatable; repeated keys mean OR
+go-rag list --filter status=indexed
+go-rag list --filter status=indexed --filter status=indexing
+go-rag list --filter type=pdf
+
+# Combine search, filters, and paging
+go-rag list --search report --filter status=indexed --limit 50 --page 2
 
 # Delete a document
 go-rag delete <document-id>
 ```
+
+Supported `--filter` keys: `status`, `type`, `name`, `path`. The footer reports
+`Showing <n> of <total> documents (offset <o>)` and a next-page hint when more
+documents remain — always check the total before assuming all documents were
+listed.
 
 ### Inspect Chunks
 

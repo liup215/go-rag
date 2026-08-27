@@ -33,6 +33,21 @@ type SearchResult struct {
 	Score float64 `json:"score"`
 }
 
+// DocumentQuery describes how documents are selected when listing.
+type DocumentQuery struct {
+	// Search is a case-insensitive substring matched against the document
+	// name and file path. Empty disables text matching.
+	Search string
+	// Filters are exact-match column filters. Multiple values for the same
+	// key are combined with SQL IN. Supported keys:
+	//   "status", "type" (doc_type), "name", "path" (file_path).
+	Filters map[string][]string
+	// Limit is the maximum number of documents returned. 0 means no limit.
+	Limit int
+	// Offset is the number of matching documents to skip.
+	Offset int
+}
+
 // WikiIndex represents a topic/category index in the personal wiki.
 type WikiIndex struct {
 	ID          string    `json:"id"`
@@ -58,7 +73,8 @@ type Storage interface {
 	CreateDocument(doc *Document) error
 	UpdateDocumentStatus(id, status, errMsg string) error
 	GetDocument(id string) (*Document, error)
-	ListDocuments(limit, offset int) ([]Document, error)
+	ListDocuments(query DocumentQuery) ([]Document, error)
+	CountDocuments(query DocumentQuery) (int, error)
 	DeleteDocument(id string) error
 	CreateChunk(chunk *Chunk) error
 	CreateChunks(chunks []Chunk) error

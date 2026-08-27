@@ -1,31 +1,27 @@
 # Active Context: go-rag
 
 ## Current work focus
-Integrated a lightweight, agent-managed personal wiki ("wiki") into go-rag, aligning with the Karpathy wiki pattern where the agent maintains an index of topics.
+Made `go-rag list` fully paginated and searchable so document libraries larger than 100 entries can be browsed and individual documents located quickly.
 
 ## Recent changes
-- Added `wiki_indexes` and `wiki_entries` tables to SQLite storage.
-- Extended `Storage` interface with wiki index and entry CRUD operations.
-- Implemented `go-rag wiki` subcommands:
-  - `index-list`, `index-create`, `index-delete`
-  - `remember`, `list`, `get`, `update`, `forget`
-- Added `cmd/go-rag/main.go` handlers and help text for the new commands.
-- Updated `internal/storage/sqlite_test.go` with wiki CRUD and cascade-delete tests.
-- Updated `internal/retriever/retriever_test.go` mock storage to satisfy the extended interface.
-- Updated `README.md` and `SKILL.md` with wiki usage documentation.
-- Fixed README feature list: changed "JSON storage" to "SQLite storage".
-- Hardened `wiki remember` validation: index ID, title, and body are all required and trimmed; empty values now fail explicitly.
-- Switched wiki entry body input/output to file-based workflow:
-  - `remember` accepts `--body` or `--file` (mutually exclusive, one required).
-  - `update` requires `--file` for body changes (or `--title` for title-only changes).
-  - New `export` command writes entry body to a file for editing.
-  - Wiki commands no longer read body from stdin.
+- Introduced `storage.DocumentQuery` (`Search`, `Filters`, `Limit`, `Offset`).
+- `Storage.ListDocuments(query)` now applies search/filter/pagination; `limit 0` means no limit.
+- Added `Storage.CountDocuments(query)` so the CLI can report the total number of matches (limit/offset ignored).
+- Document search matches name and file path as a case-insensitive substring with LIKE wildcards (`%`, `_`, `\`) escaped.
+- Document filters support keys `status`, `type`/`doc_type`, `name`, `path`/`file_path`; repeated keys combine with SQL `IN` (OR), different keys combine with AND; unsupported keys return an error.
+- `go-rag list` gained `--limit` (default 100, 0 = all), `--offset`, `--page` (1-based, overrides `--offset`), `--search`, and repeatable `--filter key=value`.
+- `go-rag list` output now ends with `Showing <n> of <total> documents (offset <o>)` plus a next-page hint when more results remain.
+- Added pure CLI helpers `resolveListOffset` and `filterFlags` (a `flag.Value`), covered by new `cmd/go-rag/main_test.go`.
+- Updated usage/help text, README.md, and SKILL.md.
 
 ## Next steps
-- Observe how agents use the wiki commands and iterate on ergonomics.
-- Consider optional enhancements: entry tags, date filters, or a wiki search fallback.
+- Observe how agents use the paginated list and iterate on ergonomics.
+- Possible follow-ups: JSON output mode, date-range filters, sorting options.
 
 ## Active decisions
-- Wiki content is stored directly in SQLite, not as Markdown files, so agents never need to read the filesystem.
-- Wiki indexes are agent-managed; go-rag does not call LLMs to generate or update the index.
-- Wiki retrieval is symbolic: list indexes → list entries → get full entry body.
+- Filtering/searching lives in the storage layer (SQL WHERE), not in the CLI, so totals and pages are always consistent.
+- The `Storage` interface was changed in place (`ListDocuments(query)`) rather than adding a parallel filtered method — all call sites are internal.
+- Pagination defaults stay in the CLI (`--limit 100`); the storage layer treats `0` as "no limit" and rejects negative values.
+
+## Previous work
+- Personal wiki subsystem (`go-rag wiki`) with `wiki_indexes`/`wiki_entries` tables, symbolic recall flow (index-list → list → get), and file-based body create/update/export.

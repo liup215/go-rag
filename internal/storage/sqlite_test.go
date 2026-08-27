@@ -1,11 +1,306 @@
 package storage
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 )
+
+// createTestDocument inserts a document with the given attributes.
+// The caller should space out creations if ordering matters, because
+// CreateDocument stamps created_at with the current time.
+func createTestDocument(t *testing.T, s *SQLiteStorage, id, name, filePath, docType, status string) {
+	t.Helper()
+	doc := &Document{
+		ID:       id,
+		Name:     name,
+		FilePath: filePath,
+		DocType:  docType,
+		Status:   status,
+	}
+	if err := s.CreateDocument(doc); err != nil {
+		t.Fatalf("failed to create document %s: %v", id, err)
+	}
+}
+
+func documentIDs(docs []Document) []string {
+	ids := make([]string, 0, len(docs))
+	for _, doc := range docs {
+		ids = append(ids, doc.ID)
+	}
+	return ids
+}
+
+func sameIDs(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	counts := make(map[string]int, len(a))
+	for _, id := range a {
+		counts[id]++
+	}
+	for _, id := range b {
+		counts[id]--
+		if counts[id] < 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func TestListDocumentsPagination(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	s, err := NewSQLiteStorage(dbPath)
+	if err != nil {
+		t.Fatalf("failed to create storage: %v", err)
+	}
+	defer s.Close()
+
+	for i := 1; i <= 5; i++ {
+		createTestDocument(t, s, fmt.Sprintf("doc-%d", i), "doc", "doc", "txt", "indexed")
+		time.Sleep(5 * time.Millisecond) // ensure distinct created_at values
+	}
+
+	all, err := s.ListDocuments(DocumentQuery{})
+	if err != nil {
+		t.Fatalf("failed to list documents: %v", err)
+	}
+	if len(all) != 5 {
+		t.Fatalf("expected 5 documents, got %d", len(all))
+	}
+
+	// Newest first ordering.
+	for i := 1; i < len(all); i++ {
+		if all[i-1].CreatedAt.Before(all[i].CreatedAt) {
+			t.Fatalf("documents not ordered newest first: %v before %v", all[i-1].CreatedAt, all[i].CreatedAt)
+		}
+	}
+	expectedOrder := []string{"doc-5", "doc-4", "doc-3", "doc-2", "doc-1"}
+	if !sameIDs(documentIDs(all), expectedOrder) {
+		t.Fatalf("unexpected order: %v", documentIDs(all))
+	}
+
+	// Page through with limit 2.
+	page1, err := s.ListDocuments(DocumentQuery{Limit: 2, Offset: 0})
+	if err != nil {
+		t.Fatalf("failed to list page 1: %v", err)
+	}
+	page2, err := s.ListDocuments(DocumentQuery{Limit: 2, Offset: 2})
+	if err != nil {
+		t.Fatalf("failed to list page 2: %v", err)
+	}
+	page3, err := s.ListDocuments(DocumentQuery{Limit: 2, Offset: 4})
+	if err != nil {
+		t.Fatalf("failed to list page 3: %v", err)
+	}
+
+	if len(page1) != 2 || len(page2) != 2 || len(page3) != 1 {
+		t.Fatalf("unexpected page sizes: %d, %d, %d", len(page1), len(page2), len(page3))
+	}
+	if !sameIDs(documentIDs(page1), []string{"doc-5", "doc-4"}) {
+		t.Fatalf("unexpected page 1: %v", documentIDs(page1))
+	}
+	if !sameIDs(documentIDs(page2), []string{"doc-3", "doc-2"}) {
+		t.Fatalf("unexpected page 2: %v", documentIDs(page2))
+	}
+	if !sameIDs(documentIDs(page3), []string{"doc-1"}) {
+		t.Fatalf("unexpected page 3: %v", documentIDs(page3))
+	}
+
+	// Offset beyond the result set is empty.
+	extra, err := s.ListDocuments(DocumentQuery{Limit: 2, Offset: 10})
+	if err != nil {
+		t.Fatalf("failed to list beyond result set: %v", err)
+	}
+	if len(extra) != 0 {
+		t.Fatalf("expected no documents beyond result set, got %d", len(extra))
+	}
+
+	// Offset without limit still skips rows.
+	rest, err := s.ListDocuments(DocumentQuery{Offset: 3})
+	if err != nil {
+		t.Fatalf("failed to list with offset only: %v", err)
+	}
+	if !sameIDs(documentIDs(rest), []string{"doc-2", "doc-1"}) {
+		t.Fatalf("unexpected remaining documents: %v", documentIDs(rest))
+	}
+}
+
+func TestListDocumentsSearchAndFilter(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	s, err := NewSQLiteStorage(dbPath)
+	if err != nil {
+		t.Fatalf("failed to create storage: %v", err)
+	}
+	defer s.Close()
+
+	createTestDocument(t, s, "doc-1", "annual-report.pdf", "docs/annual-report.pdf", "pdf", "indexed")
+	time.Sleep(5 * time.Millisecond)
+	createTestDocument(t, s, "doc-2", "meeting-notes.md", "notes/meeting-notes.md", "md", "indexed")
+	time.Sleep(5 * time.Millisecond)
+	createTestDocument(t, s, "doc-3", "50%_off.txt", "promo/50%_off.txt", "txt", "failed")
+
+	tests := []struct {
+		name     string
+		query    DocumentQuery
+		expected []string
+	}{
+		{
+			name:     "search by name",
+			query:    DocumentQuery{Search: "report"},
+			expected: []string{"doc-1"},
+		},
+		{
+			name:     "search by file path",
+			query:    DocumentQuery{Search: "notes/meeting"},
+			expected: []string{"doc-2"},
+		},
+		{
+			name:     "search is case insensitive",
+			query:    DocumentQuery{Search: "ANNUAL"},
+			expected: []string{"doc-1"},
+		},
+		{
+			name:     "search escapes LIKE wildcards",
+			query:    DocumentQuery{Search: "50%"},
+			expected: []string{"doc-3"},
+		},
+		{
+			name:     "search with no match",
+			query:    DocumentQuery{Search: "does-not-exist"},
+			expected: nil,
+		},
+		{
+			name:     "filter by status",
+			query:    DocumentQuery{Filters: map[string][]string{"status": {"indexed"}}},
+			expected: []string{"doc-1", "doc-2"},
+		},
+		{
+			name:     "filter by multiple statuses",
+			query:    DocumentQuery{Filters: map[string][]string{"status": {"indexed", "failed"}}},
+			expected: []string{"doc-1", "doc-2", "doc-3"},
+		},
+		{
+			name:     "filter by type",
+			query:    DocumentQuery{Filters: map[string][]string{"type": {"pdf"}}},
+			expected: []string{"doc-1"},
+		},
+		{
+			name:     "filter by name",
+			query:    DocumentQuery{Filters: map[string][]string{"name": {"meeting-notes.md"}}},
+			expected: []string{"doc-2"},
+		},
+		{
+			name:     "filter by path",
+			query:    DocumentQuery{Filters: map[string][]string{"path": {"promo/50%_off.txt"}}},
+			expected: []string{"doc-3"},
+		},
+		{
+			name: "search combined with filter",
+			query: DocumentQuery{
+				Search:  "report",
+				Filters: map[string][]string{"status": {"indexed"}},
+			},
+			expected: []string{"doc-1"},
+		},
+		{
+			name: "filters combined across keys",
+			query: DocumentQuery{
+				Filters: map[string][]string{"status": {"indexed"}, "type": {"md"}},
+			},
+			expected: []string{"doc-2"},
+		},
+		{
+			name: "filter with empty value list is ignored",
+			query: DocumentQuery{
+				Filters: map[string][]string{"status": {}},
+			},
+			expected: []string{"doc-1", "doc-2", "doc-3"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			docs, err := s.ListDocuments(tt.query)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if !sameIDs(documentIDs(docs), tt.expected) {
+				t.Fatalf("expected %v, got %v", tt.expected, documentIDs(docs))
+			}
+		})
+	}
+}
+
+func TestCountDocuments(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	s, err := NewSQLiteStorage(dbPath)
+	if err != nil {
+		t.Fatalf("failed to create storage: %v", err)
+	}
+	defer s.Close()
+
+	createTestDocument(t, s, "doc-1", "a.pdf", "a.pdf", "pdf", "indexed")
+	createTestDocument(t, s, "doc-2", "b.md", "b.md", "md", "indexed")
+	createTestDocument(t, s, "doc-3", "c.txt", "c.txt", "txt", "failed")
+
+	total, err := s.CountDocuments(DocumentQuery{})
+	if err != nil {
+		t.Fatalf("failed to count documents: %v", err)
+	}
+	if total != 3 {
+		t.Fatalf("expected total 3, got %d", total)
+	}
+
+	// Limit and offset must not affect the count.
+	count, err := s.CountDocuments(DocumentQuery{Limit: 2, Offset: 1})
+	if err != nil {
+		t.Fatalf("failed to count documents: %v", err)
+	}
+	if count != 3 {
+		t.Fatalf("count should ignore limit/offset, expected 3, got %d", count)
+	}
+
+	count, err = s.CountDocuments(DocumentQuery{Search: "pdf", Filters: map[string][]string{"status": {"indexed"}}})
+	if err != nil {
+		t.Fatalf("failed to count documents: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected filtered count 1, got %d", count)
+	}
+}
+
+func TestDocumentQueryValidation(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	s, err := NewSQLiteStorage(dbPath)
+	if err != nil {
+		t.Fatalf("failed to create storage: %v", err)
+	}
+	defer s.Close()
+
+	if _, err := s.ListDocuments(DocumentQuery{Limit: -1}); err == nil {
+		t.Fatal("expected error for negative limit")
+	}
+	if _, err := s.ListDocuments(DocumentQuery{Offset: -1}); err == nil {
+		t.Fatal("expected error for negative offset")
+	}
+	if _, err := s.ListDocuments(DocumentQuery{Filters: map[string][]string{"bogus": {"x"}}}); err == nil {
+		t.Fatal("expected error for unsupported filter key")
+	}
+	if _, err := s.CountDocuments(DocumentQuery{Filters: map[string][]string{"bogus": {"x"}}}); err == nil {
+		t.Fatal("expected error for unsupported filter key in CountDocuments")
+	}
+}
 
 func TestGetChunkByIndex(t *testing.T) {
 	dir := t.TempDir()

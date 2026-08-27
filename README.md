@@ -87,6 +87,42 @@ go-rag search "budget analysis" --threshold 0.7
 go-rag get-chunk <doc-id> --index 3
 ```
 
+### 6. List documents
+
+`go-rag list` is paginated: by default it shows the 100 most recent documents
+and reports the total number of matches, so you always know whether more
+documents are available.
+
+```bash
+# First 100 documents (newest first), with the total count
+go-rag list
+
+# Next page
+go-rag list --page 2
+
+# Custom page size
+go-rag list --limit 20 --offset 40
+
+# Show everything at once
+go-rag list --limit 0
+
+# Only documents whose name or file path contains "report"
+go-rag list --search report
+
+# Exact-match filters (repeatable; multiple values mean OR)
+go-rag list --filter status=indexed
+go-rag list --filter status=indexed --filter status=indexing
+go-rag list --filter type=pdf --filter path=docs/report.pdf
+
+# Combine search, filters, and paging
+go-rag list --search report --filter status=indexed --limit 50 --page 2
+```
+
+Supported `--filter` keys: `status`, `type` (document type), `name`,
+and `path` (file path). The output footer shows
+`Showing <n> of <total> documents (offset <o>)` plus a next-page hint
+when more results remain.
+
 ## Commands
 
 | Command | Description |
@@ -94,7 +130,7 @@ go-rag get-chunk <doc-id> --index 3
 | `init` | Initialize configuration |
 | `add <file>` | Add a document to the knowledge base |
 | `search <query>` | Search the knowledge base |
-| `list` | List all documents |
+| `list` | List documents with pagination, search, and filters |
 | `delete <doc-id>` | Delete a document |
 | `get-chunk <doc-id>` | Get a chunk by document ID and index |
 | `wiki index-list` | List personal wiki indexes (topics) |

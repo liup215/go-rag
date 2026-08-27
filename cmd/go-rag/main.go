@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -99,7 +100,12 @@ func printUsage() {
 	fmt.Println("    --top-k <n>           Number of results (default: 5)")
 	fmt.Println("    --threshold <f>       Similarity threshold (default: 0.5)")
 	fmt.Println("    --doc-id <id>         Restrict search to a specific document ID")
-	fmt.Println("  list                    List all documents")
+	fmt.Println("  list                    List documents (paginated)")
+	fmt.Println("    --limit <n>           Maximum documents to show, 0 = all (default: 100)")
+	fmt.Println("    --offset <n>          Number of documents to skip (default: 0)")
+	fmt.Println("    --page <n>            1-based page number (overrides --offset)")
+	fmt.Println("    --search <text>       Only show documents whose name or path contains text")
+	fmt.Println("    --filter <key=value>  Exact match filter, repeatable (status, type, name, path)")
 	fmt.Println("  delete <doc-id>         Delete a document")
 	fmt.Println("  get-chunk <doc-id>      Get a chunk by document ID and index")
 	fmt.Println("    --index <n>           Chunk index (required)")
@@ -127,6 +133,8 @@ func printUsage() {
 	fmt.Println("  go-rag add document.pdf")
 	fmt.Println("  go-rag search \"machine learning\" --top-k 10")
 	fmt.Println("  go-rag get-chunk <doc-id> --index 3")
+	fmt.Println("  go-rag list --page 2")
+	fmt.Println("  go-rag list --search report --filter status=indexed --limit 50")
 }
 
 func handleInit() {
@@ -498,7 +506,82 @@ func handleSearch() {
 	}
 }
 
+// filterFlags collects repeated --filter key=value flags into a map of
+// filter keys to accepted values.
+type filterFlags map[string][]string
+
+// String implements flag.Value.
+func (f filterFlags) String() string {
+	if len(f) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(f))
+	for key := range f {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	var parts []string
+	for _, key := range keys {
+		for _, value := range f[key] {
+			parts = append(parts, key+"="+value)
+		}
+	}
+	return strings.Join(parts, ", ")
+}
+
+// Set implements flag.Value. It is called once per --filter occurrence.
+func (f filterFlags) Set(value string) error {
+	key, val, found := strings.Cut(value, "=")
+	key = strings.TrimSpace(key)
+	val = strings.TrimSpace(val)
+	if !found || key == "" || val == "" {
+		return fmt.Errorf("expected non-empty key=value, got %q", value)
+	}
+	f[key] = append(f[key], val)
+	return nil
+}
+
+// resolveListOffset converts --limit/--offset/--page into the effective offset.
+// A positive --page overrides --offset; --limit 0 (list all) cannot be paged.
+func resolveListOffset(limit, offset, page int) (int, error) {
+	if limit < 0 {
+		return 0, fmt.Errorf("--limit must be >= 0, got %d", limit)
+	}
+	if offset < 0 {
+		return 0, fmt.Errorf("--offset must be >= 0, got %d", offset)
+	}
+	if page < 0 {
+		return 0, fmt.Errorf("--page must be >= 1, got %d", page)
+	}
+	if page == 0 {
+		return offset, nil
+	}
+	if limit == 0 {
+		return 0, fmt.Errorf("--page cannot be combined with --limit 0 (which lists everything)")
+	}
+	return (page - 1) * limit, nil
+}
+
 func handleList() {
+	// Parse flags
+	fs := flag.NewFlagSet("list", flag.ExitOnError)
+	limit := fs.Int("limit", 100, "Maximum documents to show (0 = all)")
+	offset := fs.Int("offset", 0, "Number of documents to skip")
+	page := fs.Int("page", 0, "1-based page number (overrides --offset)")
+	search := fs.String("search", "", "Only show documents whose name or file path contains this text")
+	filters := filterFlags{}
+	fs.Var(&filters, "filter", "Exact match filter key=value, repeatable (keys: status, type, name, path)")
+
+	fs.Parse(reorderArgs(os.Args[2:]))
+
+	effectiveOffset, err := resolveListOffset(*limit, *offset, *page)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Usage: go-rag list [--limit <n>] [--offset <n>] [--page <n>] [--search <text>] [--filter <key=value>]\n")
+		os.Exit(1)
+	}
+
 	// Load config
 	cfg, err := config.Load()
 	if err != nil {
@@ -513,15 +596,37 @@ func handleList() {
 		os.Exit(1)
 	}
 
-	// List documents
-	docs, err := store.ListDocuments(100, 0)
+	query := storage.DocumentQuery{
+		Search:  *search,
+		Filters: filters,
+		Limit:   *limit,
+		Offset:  effectiveOffset,
+	}
+
+	// Count all matching documents so callers know whether more pages exist.
+	total, err := store.CountDocuments(query)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error listing documents: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error querying documents: %v\n", err)
+		os.Exit(1)
+	}
+
+	// List documents
+	docs, err := store.ListDocuments(query)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error querying documents: %v\n", err)
 		os.Exit(1)
 	}
 
 	if len(docs) == 0 {
-		fmt.Println("No documents found.")
+		if total == 0 {
+			if *search != "" || len(filters) > 0 {
+				fmt.Println("No documents found matching the given filters.")
+			} else {
+				fmt.Println("No documents found.")
+			}
+			return
+		}
+		fmt.Printf("No documents at offset %d (total: %d). Use a smaller --offset or --page.\n", effectiveOffset, total)
 		return
 	}
 
@@ -542,7 +647,11 @@ func handleList() {
 		)
 	}
 
-	fmt.Printf("\nTotal: %d documents\n", len(docs))
+	fmt.Printf("\nShowing %d of %d documents (offset %d)\n", len(docs), total, effectiveOffset)
+	if remaining := total - effectiveOffset - len(docs); remaining > 0 {
+		nextOffset := effectiveOffset + len(docs)
+		fmt.Printf("%d more document(s) available. Use --offset %d to see the next page.\n", remaining, nextOffset)
+	}
 }
 
 func handleDelete() {

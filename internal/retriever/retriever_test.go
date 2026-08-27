@@ -23,8 +23,11 @@ func (m *mockStorage) Close() error                                          { r
 func (m *mockStorage) CreateDocument(doc *storage.Document) error            { return nil }
 func (m *mockStorage) UpdateDocumentStatus(id, status, errMsg string) error  { return nil }
 func (m *mockStorage) GetDocument(id string) (*storage.Document, error)      { return nil, nil }
-func (m *mockStorage) ListDocuments(limit, offset int) ([]storage.Document, error) {
+func (m *mockStorage) ListDocuments(query storage.DocumentQuery) ([]storage.Document, error) {
 	return nil, nil
+}
+func (m *mockStorage) CountDocuments(query storage.DocumentQuery) (int, error) {
+	return 0, nil
 }
 func (m *mockStorage) DeleteDocument(id string) error          { return nil }
 func (m *mockStorage) CreateChunk(chunk *storage.Chunk) error  { return nil }

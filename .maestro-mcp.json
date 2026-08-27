@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "maestro": {
+      "type": "sse",
+      "url": "http://127.0.0.1:17357/mcp/sse?role=software_developer\u0026task_id=df9b679af6d6ff208494169409744719"
+    }
+  }
+}
