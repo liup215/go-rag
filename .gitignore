@@ -49,3 +49,6 @@ config.yml
 # Temporary files
 tmp/
 temp/
+
+# Maestro session-local MCP config (per-session, never commit)
+.maestro-mcp.json
