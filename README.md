@@ -75,11 +75,23 @@ go-rag add report.docx
 
 ### 4. Search
 
+Each result shows the document it came from (ID, name, and file path) plus the
+chunk number, so you can pull surrounding context with `get-chunk` without a
+second lookup.
+
 ```bash
 go-rag search "machine learning"
 go-rag search "project requirements" --top-k 10
 go-rag search "budget analysis" --threshold 0.7
+
+# Machine-readable output for scripts and agents
+go-rag search "machine learning" --json
 ```
+
+`--json` prints `{query, count, results}`, where each result carries
+`document_id`, `document_name`, `document_path`, `score`, `chunk_id`,
+`chunk_index`, and `text`. Documents that no longer exist leave
+`document_name`/`document_path` empty instead of dropping the hit.
 
 ### 5. Get a specific chunk
 
@@ -116,12 +128,19 @@ go-rag list --filter type=pdf --filter path=docs/report.pdf
 
 # Combine search, filters, and paging
 go-rag list --search report --filter status=indexed --limit 50 --page 2
+
+# Machine-readable output for scripts and agents
+go-rag list --json
 ```
 
 Supported `--filter` keys: `status`, `type` (document type), `name`,
 and `path` (file path). The output footer shows
 `Showing <n> of <total> documents (offset <o>)` plus a next-page hint
 when more results remain.
+
+With `--json`, `list` prints `{total, offset, count, documents}` — the same
+filters, paging, and totals apply, and empty pages serialize as `[]` instead
+of a message.
 
 ## Commands
 
