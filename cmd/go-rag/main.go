@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -24,6 +25,13 @@ import (
 
 const version = "v0.4.0"
 
+// booleanFlags names flags that take no value. reorderArgs must not treat the
+// token after them as the flag's value, so "go-rag search --json <query>"
+// keeps the query as a positional argument.
+var booleanFlags = map[string]bool{
+	"json": true,
+}
+
 // reorderArgs moves flags (and their values) before positional arguments.
 // The standard flag package stops parsing at the first non-flag argument,
 // so this allows users to place flags after positional args.
@@ -32,8 +40,15 @@ func reorderArgs(args []string) []string {
 	for i := 0; i < len(args); {
 		arg := args[i]
 		if strings.HasPrefix(arg, "-") {
+			name := strings.TrimLeft(arg, "-")
+			if strings.Contains(name, "=") {
+				// --flag=value carries its own value.
+				flags = append(flags, arg)
+				i++
+				continue
+			}
 			flags = append(flags, arg)
-			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+			if !booleanFlags[name] && i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
 				flags = append(flags, args[i+1])
 				i += 2
 			} else {
@@ -100,12 +115,14 @@ func printUsage() {
 	fmt.Println("    --top-k <n>           Number of results (default: 5)")
 	fmt.Println("    --threshold <f>       Similarity threshold (default: 0.5)")
 	fmt.Println("    --doc-id <id>         Restrict search to a specific document ID")
+	fmt.Println("    --json                Output machine-readable JSON")
 	fmt.Println("  list                    List documents (paginated)")
 	fmt.Println("    --limit <n>           Maximum documents to show, 0 = all (default: 100)")
 	fmt.Println("    --offset <n>          Number of documents to skip (default: 0)")
 	fmt.Println("    --page <n>            1-based page number (overrides --offset)")
 	fmt.Println("    --search <text>       Only show documents whose name or path contains text")
 	fmt.Println("    --filter <key=value>  Exact match filter, repeatable (status, type, name, path)")
+	fmt.Println("    --json                Output machine-readable JSON (total, offset, documents)")
 	fmt.Println("  delete <doc-id>         Delete a document")
 	fmt.Println("  get-chunk <doc-id>      Get a chunk by document ID and index")
 	fmt.Println("    --index <n>           Chunk index (required)")
@@ -132,8 +149,10 @@ func printUsage() {
 	fmt.Println("  go-rag config set embedding.api-key sk-...")
 	fmt.Println("  go-rag add document.pdf")
 	fmt.Println("  go-rag search \"machine learning\" --top-k 10")
+	fmt.Println("  go-rag search \"machine learning\" --json")
 	fmt.Println("  go-rag get-chunk <doc-id> --index 3")
 	fmt.Println("  go-rag list --page 2")
+	fmt.Println("  go-rag list --json")
 	fmt.Println("  go-rag list --search report --filter status=indexed --limit 50")
 }
 
@@ -415,12 +434,13 @@ func handleSearch() {
 	topK := fs.Int("top-k", 5, "Number of results")
 	threshold := fs.Float64("threshold", 0.5, "Similarity threshold")
 	docID := fs.String("doc-id", "", "Restrict search to a specific document ID")
+	asJSON := fs.Bool("json", false, "Output machine-readable JSON")
 
 	fs.Parse(reorderArgs(os.Args[2:]))
 
 	if fs.NArg() < 1 {
 		fmt.Fprintf(os.Stderr, "Error: query required\n")
-		fmt.Fprintf(os.Stderr, "Usage: go-rag search <query> [--top-k <n>] [--threshold <f>]\n")
+		fmt.Fprintf(os.Stderr, "Usage: go-rag search <query> [--top-k <n>] [--threshold <f>] [--doc-id <id>] [--json]\n")
 		os.Exit(1)
 	}
 
@@ -490,6 +510,27 @@ func handleSearch() {
 		os.Exit(1)
 	}
 
+	// Resolve the documents behind the hits so results can say where they
+	// came from (name and file path), not just the document UUID.
+	docs, err := loadDocumentsForResults(store, results)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error loading documents: %v\n", err)
+		os.Exit(1)
+	}
+
+	if *asJSON {
+		output := searchOutputJSON{
+			Query:   query,
+			Count:   len(results),
+			Results: buildSearchResultsJSON(results, docs),
+		}
+		if err := writeJSON(output); err != nil {
+			fmt.Fprintf(os.Stderr, "Error encoding JSON: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	// Display results
 	if len(results) == 0 {
 		fmt.Println("No results found.")
@@ -498,12 +539,122 @@ func handleSearch() {
 
 	fmt.Printf("Found %d results:\n\n", len(results))
 	for i, result := range results {
+		docName, docPath := documentDisplayInfo(docs, result.Chunk.DocumentID)
 		fmt.Printf("--- Result %d (score: %.4f) ---\n", i+1, result.Score)
-		fmt.Printf("Document ID: %s\n", result.Chunk.DocumentID)
+		fmt.Printf("Document ID:   %s\n", result.Chunk.DocumentID)
+		fmt.Printf("Document Name: %s\n", docName)
+		fmt.Printf("Document Path: %s\n", docPath)
 		fmt.Printf("Chunk %d:\n", result.Chunk.Index)
 		fmt.Println(result.Chunk.Text)
 		fmt.Println()
 	}
+}
+
+// searchResultJSON is the machine-readable form of one search hit.
+type searchResultJSON struct {
+	DocumentID   string  `json:"document_id"`
+	DocumentName string  `json:"document_name"`
+	DocumentPath string  `json:"document_path"`
+	Score        float64 `json:"score"`
+	ChunkID      string  `json:"chunk_id"`
+	ChunkIndex   int     `json:"chunk_index"`
+	Text         string  `json:"text"`
+}
+
+// searchOutputJSON is the top-level payload of `go-rag search --json`.
+type searchOutputJSON struct {
+	Query   string             `json:"query"`
+	Count   int                `json:"count"`
+	Results []searchResultJSON `json:"results"`
+}
+
+// listOutputJSON is the top-level payload of `go-rag list --json`.
+type listOutputJSON struct {
+	Total     int                `json:"total"`
+	Offset    int                `json:"offset"`
+	Count     int                `json:"count"`
+	Documents []storage.Document `json:"documents"`
+}
+
+// nonNilDocuments normalizes a document slice so empty pages marshal as []
+// instead of null.
+func nonNilDocuments(docs []storage.Document) []storage.Document {
+	if docs == nil {
+		return []storage.Document{}
+	}
+	return docs
+}
+
+// loadDocumentsForResults resolves the documents referenced by search results.
+// Each distinct document ID is fetched exactly once and the returned map is
+// keyed by document ID; an entry is nil when the document no longer exists
+// (e.g. orphaned chunks of a deleted document).
+func loadDocumentsForResults(store storage.Storage, results []storage.SearchResult) (map[string]*storage.Document, error) {
+	ids := make([]string, 0, len(results))
+	seen := make(map[string]struct{}, len(results))
+	for _, result := range results {
+		id := result.Chunk.DocumentID
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+
+	docs := make(map[string]*storage.Document, len(ids))
+	for _, id := range ids {
+		doc, err := store.GetDocument(id)
+		if err != nil {
+			return nil, err
+		}
+		docs[id] = doc
+	}
+	return docs, nil
+}
+
+// documentDisplayInfo returns the name and file path shown for a search hit.
+// Documents that cannot be resolved degrade to a placeholder instead of
+// hiding the hit.
+func documentDisplayInfo(docs map[string]*storage.Document, docID string) (name, path string) {
+	doc := docs[docID]
+	if doc == nil {
+		return "(unknown)", "(unknown)"
+	}
+	return doc.Name, doc.FilePath
+}
+
+// buildSearchResultsJSON converts search hits into their JSON form, enriching
+// each hit with the document name and path when the document still exists.
+// The returned slice is never nil so empty result sets marshal as [].
+func buildSearchResultsJSON(results []storage.SearchResult, docs map[string]*storage.Document) []searchResultJSON {
+	out := make([]searchResultJSON, 0, len(results))
+	for _, result := range results {
+		item := searchResultJSON{
+			DocumentID: result.Chunk.DocumentID,
+			Score:      result.Score,
+			ChunkID:    result.Chunk.ID,
+			ChunkIndex: result.Chunk.Index,
+			Text:       result.Chunk.Text,
+		}
+		if doc := docs[result.Chunk.DocumentID]; doc != nil {
+			item.DocumentName = doc.Name
+			item.DocumentPath = doc.FilePath
+		}
+		out = append(out, item)
+	}
+	return out
+}
+
+// writeJSON prints v as indented JSON on stdout. HTML escaping is disabled so
+// file paths and chunk text stay readable.
+func writeJSON(v interface{}) error {
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetEscapeHTML(false)
+	enc.SetIndent("", "  ")
+	return enc.Encode(v)
 }
 
 // filterFlags collects repeated --filter key=value flags into a map of
@@ -570,6 +721,7 @@ func handleList() {
 	offset := fs.Int("offset", 0, "Number of documents to skip")
 	page := fs.Int("page", 0, "1-based page number (overrides --offset)")
 	search := fs.String("search", "", "Only show documents whose name or file path contains this text")
+	asJSON := fs.Bool("json", false, "Output machine-readable JSON")
 	filters := filterFlags{}
 	fs.Var(&filters, "filter", "Exact match filter key=value, repeatable (keys: status, type, name, path)")
 
@@ -615,6 +767,20 @@ func handleList() {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error querying documents: %v\n", err)
 		os.Exit(1)
+	}
+
+	if *asJSON {
+		output := listOutputJSON{
+			Total:     total,
+			Offset:    effectiveOffset,
+			Count:     len(docs),
+			Documents: nonNilDocuments(docs),
+		}
+		if err := writeJSON(output); err != nil {
+			fmt.Fprintf(os.Stderr, "Error encoding JSON: %v\n", err)
+			os.Exit(1)
+		}
+		return
 	}
 
 	if len(docs) == 0 {

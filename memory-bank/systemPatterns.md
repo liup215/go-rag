@@ -37,7 +37,7 @@ The personal wiki ("wiki") is intentionally separate from the RAG pipeline:
 
 ## Critical implementation paths
 - Adding a storage query requires updating the interface, SQLite implementation, and any mock implementations.
-- CLI flags use `flag.NewFlagSet` plus `reorderArgs` to allow flags after positional arguments.
+- CLI flags use `flag.NewFlagSet` plus `reorderArgs` to allow flags after positional arguments. Valueless flags must be listed in `booleanFlags` (package-level map in `cmd/go-rag/main.go`) or `reorderArgs` attaches the next token as the flag's value — `--flag=value` forms are always passed through untouched.
 - Wiki deletion cascades manually in a SQLite transaction to avoid relying on per-connection foreign-key pragma state.
 
 ## Document listing pattern
@@ -48,3 +48,11 @@ The personal wiki ("wiki") is intentionally separate from the RAG pipeline:
 - Repeated `--filter key=value` flags accumulate via the `filterFlags` type (a `flag.Value`); repeated keys become SQL `IN` (OR).
 - `resolveListOffset(limit, offset, page)` centralizes pagination math and validation; `page` overrides `offset`, `limit 0` means "no limit" and cannot be paged.
 - Both helpers are pure and unit-tested in `cmd/go-rag/main_test.go`; keep business logic in such helpers rather than inside handlers that call `os.Exit`.
+
+## Search output & JSON pattern
+- Search hits are joined to their document in the CLI layer: `loadDocumentsForResults` queries `GetDocument` once per distinct `Chunk.DocumentID` (top-k is small, so no SQL join / interface change is warranted). The returned map holds nil for documents that no longer exist, and empty IDs are skipped.
+- Human output shows `Document ID` / `Document Name` / `Document Path` per hit; unresolvable documents print `(unknown)` rather than hiding the hit.
+- `--json` is opt-in per command. `search --json` → `{query, count, results}` with per-hit `document_id/document_name/document_path/score/chunk_id/chunk_index/text`; `list --json` → `{total, offset, count, documents}` reusing `storage.Document`'s snake_case tags.
+- Never marshal `storage.Chunk` directly — it would leak embedding vectors. Dedicated JSON structs (`searchResultJSON`, `searchOutputJSON`, `listOutputJSON`) keep `document_name`/`document_path` present-but-empty (stable schema, no `omitempty`) for missing documents.
+- Empty collections must serialize as `[]`, not `null` (`buildSearchResultsJSON` / `nonNilDocuments` normalize).
+- `writeJSON` emits indented JSON with HTML escaping disabled so paths and chunk text stay readable; JSON mode suppresses human-only messages ("No results found.", footers) so stdout stays pure JSON.

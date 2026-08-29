@@ -1,25 +1,69 @@
 # Active Context: go-rag
 
 ## Current work focus
-Fixed BM25 tokenisation for Chinese/CJK text so the keyword branch of hybrid retrieval actually fires: contiguous CJK runs are split into bigrams (+unigrams) and CJK punctuation separates tokens.
+Search results now identify their source document, and `search`/`list` gained
+`--json` machine-readable output (the JSON-output item from progress.md's todo
+list).
 
 ## Recent changes
-- Root cause: `isWordChar` treated every rune > 127 (including CJK punctuation '，' '。') as a word character, so `splitWords` collapsed a whole Chinese sentence — sometimes a whole chunk — into a single token. BM25 could then only match when the query equalled that exact run, so Chinese keyword recall was effectively zero.
-- `internal/retriever/retriever.go`: `isWordChar` now accepts non-ASCII runes only when they are not punctuation/symbol/space/control (Unicode category based), so CJK punctuation acts as a separator.
-- New helpers `splitWordRun`, `cjkNgrams`, `isCJKRune`: contiguous CJK runs (Han/Kana/Hangul via `unicode.Is` script tables) split into overlapping bigrams with unigrams layered on top ("机器学习" → 机, 机器, 器, 器学, 学, 学习, 习); non-CJK sub-runs stay whole, so "GPT4模型" yields "gpt4" plus the 模型 n-grams.
-- ASCII word behaviour is unchanged (runs of `[0-9A-Za-z]` are one lower-cased token); existing `TestTokenize` cases pass untouched.
-- New tests in `internal/retriever/tokenize_cjk_test.go`: bigram/punctuation/single-char/mixed-script tokenisation, BM25 Chinese query matching ("机器学习" → chunk containing "…机器学习算法…"), single-char CJK query, retriever keyword and hybrid Chinese paths.
+- `cmd/go-rag/main.go` (`handleSearch`): after retrieval, hits are enriched with
+  the `documents` row. `loadDocumentsForResults` collects the distinct
+  `Chunk.DocumentID`s and calls `GetDocument` once per ID (chosen over adding a
+  SQL-join method to `storage.Storage`, which would have touched the interface
+  plus every mock). Human output prints `Document Name:` / `Document Path:`
+  under each result, next to the existing `Document ID:`.
+- Missing documents degrade instead of erroring: a document that no longer
+  exists yields empty `document_name`/`document_path` in JSON and `(unknown)` in
+  human output; an empty `DocumentID` is never queried.
+- `search --json` prints `{query, count, results}`; each result has
+  `document_id`, `document_name`, `document_path`, `score`, `chunk_id`,
+  `chunk_index`, `text` (snake_case, matching `storage.Document`'s tags). The
+  embedding vectors are deliberately excluded — a dedicated JSON struct is used
+  instead of marshalling `storage.Chunk`.
+- `list --json` prints `{total, offset, count, documents}` reusing
+  `storage.Document`; empty result sets serialize as `[]` (`nonNilDocuments`),
+  never `null`. Filters, paging, and totals behave exactly as in table mode.
+- `writeJSON` uses an indented, non-HTML-escaped encoder so paths and chunk
+  text stay readable.
+- `reorderArgs` gained a `booleanFlags` set: previously it attached the next
+  token to any flag, so `go-rag search --json <query>` consumed the query as the
+  flag's value. Only `json` is registered, so all pre-existing invocations are
+  unaffected.
+- Usage/help text and the README/SKILL command docs were updated for `--json`.
+- Tests (`cmd/go-rag/main_test.go`): `docLookupStub` (embeds `storage.Storage`,
+  overrides `GetDocument`) backs `TestLoadDocumentsForResults` (dedupe, missing
+  doc → nil, empty ID skipped); `TestBuildSearchResultsJSON`; JSON shape tests
+  pinning the wire format of both payloads; `TestNonNilDocuments`;
+  `TestReorderArgsBooleanFlags`.
 
 ## Next steps
-- Known follow-up: `SQLiteStorage.SearchByKeyword` pre-filters with one `LIKE '%<query>%'` on the raw query, so a multi-word Chinese query ("机器学习 算法") returns an empty candidate set before BM25 runs. Consider tokenising the query into AND/OR LIKE clauses. The hybrid path is unaffected (it loads all chunks).
-- `BuildBM25Index` is rebuilt from all chunks on every search; consider caching if corpora grow (out of scope for now).
+- Candidate follow-up (from known issues): `SQLiteStorage.SearchByKeyword`
+  LIKE-pre-filters on the raw query, so multi-word Chinese queries can return an
+  empty candidate set; tokenise into AND/OR LIKE clauses.
+- Consider `--json` for `get-chunk` and `wiki` subcommands if scripting demand
+  appears.
 
 ## Active decisions
-- CJK n-gram tokenisation emits bigrams **and** unigrams: bigrams carry the discriminative power, unigrams keep one-character queries matchable. Task explicitly allowed stacking unigrams.
-- Scripts needing n-grams are detected with stdlib script tables (`unicode.Is(unicode.Han|Hiragana|Katakana|Hangul, r)`), not hand-rolled ranges.
-- Tokenisation change is scoped to `internal/retriever` (`tokenize` is only used by `bm25.go`); storage LIKE pre-filter left as-is for now.
-- Previous: filtering/searching lives in the storage layer (SQL WHERE), not in the CLI; pagination defaults stay in the CLI (`--limit 100`); `0` means "no limit".
-- The `Storage` interface was changed in place (`ListDocuments(query)`) rather than adding a parallel filtered method — all call sites are internal.
+- Document lookup for search results stays in the CLI layer via `GetDocument`
+  per distinct ID — top-k is small, and it avoids changing the `Storage`
+  interface (which would ripple into mocks). Revisit with a single
+  `GetDocuments(ids)`/join if top-k or N+1 concerns grow.
+- JSON keys are snake_case and stable regardless of hit state (no `omitempty`
+  on name/path), so consumers get one schema; empty results marshal as `[]`,
+  never `null`.
+- JSON output is opt-in per command (`--json`); human-readable output is
+  byte-for-byte unchanged apart from the two added document lines in `search`.
+- `reorderArgs`' bool-flag list (`booleanFlags`) is a package-level map rather
+  than a per-FlagSet parameter: flags are global to this CLI and it keeps the
+  helper's signature unchanged.
+- Previous: filtering/searching lives in the storage layer (SQL WHERE), not in
+  the CLI; pagination defaults stay in the CLI (`--limit 100`); `0` means "no
+  limit"; the `Storage` interface was changed in place rather than adding a
+  parallel filtered method.
 
 ## Previous work
-- Personal wiki subsystem (`go-rag wiki`) with `wiki_indexes`/`wiki_entries` tables, symbolic recall flow (index-list → list → get), and file-based body create/update/export.
+- CJK/BM25 tokenisation fix (bigrams + unigrams, punctuation separators) so
+  Chinese keyword queries actually recall chunks.
+- Personal wiki subsystem (`go-rag wiki`) with `wiki_indexes`/`wiki_entries`
+  tables, symbolic recall flow (index-list → list → get), and file-based body
+  create/update/export.

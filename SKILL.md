@@ -113,6 +113,10 @@ go-rag add large-document.pdf --chunk-size 1024 --overlap 200
 
 ### Search
 
+Each hit reports the document it came from — ID, name, and file path — plus the
+chunk index, so you can read surrounding context with `get-chunk` without a
+second `list` lookup.
+
 ```bash
 # Basic search
 go-rag search "machine learning concepts"
@@ -122,7 +126,14 @@ go-rag search "project requirements" --top-k 10
 
 # Higher similarity threshold
 go-rag search "budget analysis" --threshold 0.7
+
+# Machine-readable output (preferred for agents and scripts)
+go-rag search "machine learning concepts" --json
 ```
+
+With `--json`, the output is `{query, count, results}`; each result carries
+`document_id`, `document_name`, `document_path`, `score`, `chunk_id`,
+`chunk_index`, and `text`.
 
 ### Manage Documents
 
@@ -152,6 +163,9 @@ go-rag list --filter type=pdf
 # Combine search, filters, and paging
 go-rag list --search report --filter status=indexed --limit 50 --page 2
 
+# Machine-readable output (preferred for agents and scripts)
+go-rag list --json
+
 # Delete a document
 go-rag delete <document-id>
 ```
@@ -160,6 +174,9 @@ Supported `--filter` keys: `status`, `type`, `name`, `path`. The footer reports
 `Showing <n> of <total> documents (offset <o>)` and a next-page hint when more
 documents remain — always check the total before assuming all documents were
 listed.
+
+With `--json`, the output is `{total, offset, count, documents}` instead of the
+table; the same filters, paging, and totals apply.
 
 ### Inspect Chunks
 
