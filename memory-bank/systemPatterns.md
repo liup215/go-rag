@@ -63,7 +63,13 @@ The personal wiki ("wiki") is intentionally separate from the RAG pipeline:
   load sites.
 - **Write worker results**: ops travel through `writeCh` as `*writeOp`; a
   worker-filled field (e.g. `chunksDeleted`) may be read by the caller only
-  after it receives from `op.result` (channel happens-before).
+  after it receives from `op.result` (channel happens-before). Ops that report
+  a removed-row count go through `sendWriteOpCount` (document delete, orphan
+  chunk cleanup); plain ops use `sendWriteOp`. Every mutation — `DeleteOrphanChunks`
+  included — uses the queue; the queue cannot serialise across *processes*, so
+  worker-side multi-statement writes additionally wrap their transaction in
+  `withBusyRetry` (`deleteDocumentCascade`, `opCreateChunks`,
+  `opDeleteWikiIndex`, `deleteOrphanChunks`).
 - **Check before delete** (CLI): `DeleteDocument` reports success with 0 chunks
   for both an unknown ID and a document that simply has no chunks, so the CLI
   cannot infer existence from the delete result — once the delete has run the

@@ -33,6 +33,21 @@ with `(0 chunk(s) removed)` instead of a false "not found".
   `(0 chunk(s) removed)`; unknown ID → exit 1 `not found`; 2-chunk delete →
   exit 0 `(2 chunk(s) removed)`; `gc --dry-run` shows no orphans afterwards.
 
+## Storage follow-ups in the same round (uncommitted → this commit)
+- `opCreateChunks` (batch chunk insert) and `opDeleteWikiIndex` are multi-
+  statement transactions executed by the write worker; both are now wrapped in
+  `withBusyRetry` like `deleteDocumentCascade`. Each rolls back on failure, so
+  a retry re-runs from scratch and cannot leave partial rows — this makes
+  SKILL.md's "batch chunk inserts are retried automatically" claim true instead
+  of aspirational.
+- `DeleteOrphanChunks` used to `db.Exec` directly, the one mutation bypassing
+  the single-writer queue (contradicting the `SQLiteStorage` type comment). It
+  now sends `opDeleteOrphanChunks` through `sendWriteOpCount` (the generalized
+  former `sendWriteOpCascade`, which any op that reports a removed-row count can
+  reuse); the `DELETE` itself moved to `deleteOrphanChunks`, still under
+  `withBusyRetry` because the queue only serialises writes within one process.
+- `handleDelete`/`handleGC` now `defer store.Close()` like every other handler.
+
 ## Previous round (orphan-chunk fix, committed as 3019022)
 - **Root cause** (probe-verified): the DSN used mattn-style parameters
   (`_journal=WAL&_busy_timeout=5000&_fk=1`), but `modernc.org/sqlite` only
@@ -89,6 +104,10 @@ with `(0 chunk(s) removed)` instead of a false "not found".
   passes plain `go test` and `-race` is green for every other package.
 
 ## Active decisions
+- Every mutation goes through the single write worker — `DeleteOrphanChunks`
+  included. The queue cannot serialise against *other processes*, which is why
+  worker-side multi-statement writes keep their `withBusyRetry` wrapper; single-
+  statement reads (`CountOrphanChunks`) stay on the pool.
 - Existence is checked in the CLI **before** `DeleteDocument`, not derived from
   the delete result: the storage call cannot distinguish an unknown ID from a
   chunk-less document, and a post-delete lookup cannot either. A document that
