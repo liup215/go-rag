@@ -207,8 +207,23 @@ func (s *SQLiteStorage) execWriteOp(op writeOp) error {
 
 	case opDeleteDocument:
 		id := op.payload.(string)
-		_, err := s.db.Exec(`DELETE FROM documents WHERE id = ?`, id)
-		return err
+		// Delete chunks first, then the document, within a single transaction.
+		// The schema declares ON DELETE CASCADE on chunks, but the modernc
+		// driver ignores the _fk DSN parameter, so foreign key enforcement is
+		// not guaranteed; deleting explicitly prevents orphaned chunks (which
+		// would keep polluting GetAllChunks/SearchByKeyword).
+		tx, err := s.db.Begin()
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback()
+		if _, err := tx.Exec(`DELETE FROM chunks WHERE document_id = ?`, id); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`DELETE FROM documents WHERE id = ?`, id); err != nil {
+			return err
+		}
+		return tx.Commit()
 
 	case opCreateChunk:
 		chunk := op.payload.(*Chunk)

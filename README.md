@@ -73,6 +73,15 @@ go-rag add notes.md
 go-rag add report.docx
 ```
 
+Adding a file whose path is already indexed is a no-op: go-rag prints the
+existing document ID and exits successfully instead of creating a duplicate.
+Use `--force` to delete the existing document (chunks included) and re-index
+the file:
+
+```bash
+go-rag add document.pdf --force
+```
+
 ### 4. Search
 
 ```bash
@@ -128,7 +137,7 @@ when more results remain.
 | Command | Description |
 |---------|-------------|
 | `init` | Initialize configuration |
-| `add <file>` | Add a document to the knowledge base |
+| `add <file>` | Add a document to the knowledge base (skips already indexed paths; `--force` re-indexes) |
 | `search <query>` | Search the knowledge base |
 | `list` | List documents with pagination, search, and filters |
 | `delete <doc-id>` | Delete a document |

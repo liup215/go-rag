@@ -2,7 +2,7 @@
 
 ## Technologies
 - Go 1.25
-- SQLite via `modernc.org/sqlite` (pure Go, no CGO)
+- SQLite via `modernc.org/sqlite` (pure Go, no CGO). Note: the driver supports only `_pragma`, `_time_format`, `_time_integer_format`, `_dqs`, `_error_rc` DSN params — `_journal=WAL`, `_busy_timeout`, and `_fk=1` are silently ignored. Use `_pragma=...` if a pragma is actually needed.
 - UUID generation via `github.com/google/uuid`
 - YAML config via `gopkg.in/yaml.v3`
 - PDF parsing via `github.com/razvandimescu/gopdf`

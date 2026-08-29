@@ -39,6 +39,8 @@ The personal wiki ("wiki") is intentionally separate from the RAG pipeline:
 - Adding a storage query requires updating the interface, SQLite implementation, and any mock implementations.
 - CLI flags use `flag.NewFlagSet` plus `reorderArgs` to allow flags after positional arguments.
 - Wiki deletion cascades manually in a SQLite transaction to avoid relying on per-connection foreign-key pragma state.
+- **Document deletion does the same**: `opDeleteDocument` deletes chunks then the document in one transaction. The `chunks.document_id` FK declares `ON DELETE CASCADE`, but the modernc driver ignores the `_fk` DSN param (only `_pragma=...` is supported), so cascade cannot be relied on. Any new parent/child delete must cascade explicitly.
+- **Duplicate ingestion guard**: `handleAdd` normalizes the input path with `filepath.Clean`, then `documentsAtPath` queries `DocumentQuery{Filters: {"path": {path}}}` (exact SQL match). Skip = stdout notice + `return` (exit 0) before parsing; `--force` deletes the existing records after parse+chunk succeed and before `CreateDocument`. Keep the decision logic in small helpers (`documentsAtPath`, `printDuplicateNotice`) so it can be unit-tested with real SQLite storage in `cmd/go-rag/main_test.go`.
 
 ## Document listing pattern
 - `storage.DocumentQuery` (`Search`, `Filters`, `Limit`, `Offset`) is the single input for `ListDocuments` and `CountDocuments`.
