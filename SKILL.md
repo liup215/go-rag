@@ -111,6 +111,11 @@ go-rag add document.pdf
 go-rag add large-document.pdf --chunk-size 1024 --overlap 200
 ```
 
+Adding a file whose path is already indexed does nothing: go-rag prints the
+existing document ID and exits 0. Pass `--force` to delete the existing
+document (chunks included) and index the file again — useful after editing a
+document.
+
 ### Search
 
 Each hit reports the document it came from — ID, name, and file path — plus the

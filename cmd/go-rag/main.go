@@ -111,6 +111,7 @@ func printUsage() {
 	fmt.Println("  add <file>              Add a document to the knowledge base")
 	fmt.Println("    --chunk-size <n>      Chunk size in tokens (default: 512)")
 	fmt.Println("    --overlap <n>         Overlap size in tokens (default: 100)")
+	fmt.Println("    --force               Delete the existing document at this path and re-index")
 	fmt.Println("  search <query>          Search the knowledge base")
 	fmt.Println("    --top-k <n>           Number of results (default: 5)")
 	fmt.Println("    --threshold <f>       Similarity threshold (default: 0.5)")
@@ -178,16 +179,19 @@ func handleAdd() {
 	chunkSize := fs.Int("chunk-size", 512, "Chunk size in tokens")
 	overlap := fs.Int("overlap", 100, "Overlap size in tokens")
 	workers := fs.Int("workers", 10, "Number of concurrent workers (default: 10)")
+	force := fs.Bool("force", false, "Delete an existing document at this path and re-index")
 
 	fs.Parse(reorderArgs(os.Args[2:]))
 
 	if fs.NArg() < 1 {
 		fmt.Fprintf(os.Stderr, "Error: file path required\n")
-		fmt.Fprintf(os.Stderr, "Usage: go-rag add <file> [--chunk-size <n>] [--overlap <n>] [--workers <n>]\n")
+		fmt.Fprintf(os.Stderr, "Usage: go-rag add <file> [--chunk-size <n>] [--overlap <n>] [--workers <n>] [--force]\n")
 		os.Exit(1)
 	}
 
-	filePath := fs.Arg(0)
+	// Clean the path so the same file always maps to the same record no matter
+	// how it was spelled on the command line ("./report.pdf" vs "report.pdf").
+	filePath := filepath.Clean(fs.Arg(0))
 
 	// Load config
 	cfg, err := config.Load()
@@ -201,6 +205,25 @@ func handleAdd() {
 		fmt.Fprintf(os.Stderr, "Error: embedding API key not configured\n")
 		fmt.Fprintf(os.Stderr, "Run: go-rag config set embedding.api-key <your-key>\n")
 		os.Exit(1)
+	}
+
+	// Initialize storage
+	store, err := storage.NewStorage(cfg.Storage.Path)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error initializing storage: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Duplicate detection: a document already indexed from this path is either
+	// reported (skip) or deleted (--force), never silently duplicated.
+	existing, err := documentsAtPath(store, filePath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error checking for existing document: %v\n", err)
+		os.Exit(1)
+	}
+	if len(existing) > 0 && !*force {
+		printDuplicateNotice(existing)
+		return
 	}
 
 	// Parse file
@@ -228,11 +251,17 @@ func handleAdd() {
 		os.Exit(1)
 	}
 
-	// Initialize storage
-	store, err := storage.NewStorage(cfg.Storage.Path)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error initializing storage: %v\n", err)
-		os.Exit(1)
+	// --force: drop the existing record(s) only now that parsing and chunking
+	// succeeded, so a failure above never destroys already-indexed data.
+	if len(existing) > 0 {
+		fmt.Printf("⚠ --force: removing %d existing document(s) at this path\n", len(existing))
+		for _, old := range existing {
+			if err := store.DeleteDocument(old.ID); err != nil {
+				fmt.Fprintf(os.Stderr, "Error removing existing document %s: %v\n", old.ID, err)
+				os.Exit(1)
+			}
+			fmt.Printf("✓ Removed %s (status: %s)\n", old.ID, old.Status)
+		}
 	}
 
 	// Create document record
@@ -416,6 +445,30 @@ func handleAdd() {
 		}
 		fmt.Printf("\n✅ Successfully indexed %d chunks (ID: %s)\n", completedChunks, doc.ID)
 	}
+}
+
+// documentsAtPath returns every document already stored at filePath, newest
+// first. It powers duplicate detection in handleAdd: the "path" filter is an
+// exact SQL match, so similar-looking paths are not treated as duplicates.
+func documentsAtPath(store storage.Storage, filePath string) ([]storage.Document, error) {
+	return store.ListDocuments(storage.DocumentQuery{
+		Filters: map[string][]string{"path": {filePath}},
+	})
+}
+
+// printDuplicateNotice reports an add that was skipped because the file path
+// is already indexed, and how to force a rebuild.
+func printDuplicateNotice(docs []storage.Document) {
+	doc := docs[0]
+	fmt.Println("⚠ Document already exists for this path, skipping ingestion.")
+	fmt.Printf("  Doc ID: %s\n", doc.ID)
+	fmt.Printf("  Name:   %s\n", doc.Name)
+	fmt.Printf("  Path:   %s\n", doc.FilePath)
+	fmt.Printf("  Status: %s\n", doc.Status)
+	if len(docs) > 1 {
+		fmt.Printf("  Note:   %d older duplicate document(s) also exist for this path.\n", len(docs)-1)
+	}
+	fmt.Println("  Re-run with --force to delete the existing document(s) and re-index.")
 }
 
 func formatDuration(d time.Duration) string {

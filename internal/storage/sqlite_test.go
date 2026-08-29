@@ -527,6 +527,58 @@ func TestWikiEntryCascadeDelete(t *testing.T) {
 	}
 }
 
+func TestDeleteDocumentRemovesChunks(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	s, err := NewSQLiteStorage(dbPath)
+	if err != nil {
+		t.Fatalf("failed to create storage: %v", err)
+	}
+	defer s.Close()
+
+	createTestDocument(t, s, "doc-1", "gone.txt", "gone.txt", "txt", "indexed")
+	createTestDocument(t, s, "doc-2", "kept.txt", "kept.txt", "txt", "indexed")
+
+	chunks := []Chunk{
+		// Embeddings matter: GetAllChunks only returns chunks that have one,
+		// so a surviving orphan would keep polluting search results.
+		{ID: "chunk-1", DocumentID: "doc-1", Text: "orphaned?", Index: 0, Embedding: []float32{0.1, 0.2}},
+		{ID: "chunk-2", DocumentID: "doc-2", Text: "kept chunk", Index: 0, Embedding: []float32{0.3, 0.4}},
+	}
+	if err := s.CreateChunks(chunks); err != nil {
+		t.Fatalf("failed to create chunks: %v", err)
+	}
+
+	if err := s.DeleteDocument("doc-1"); err != nil {
+		t.Fatalf("failed to delete document: %v", err)
+	}
+
+	gone, err := s.GetChunksByDocument("doc-1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(gone) != 0 {
+		t.Fatalf("expected no chunks left for deleted document, got %d", len(gone))
+	}
+
+	all, err := s.GetAllChunks()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(all) != 1 || all[0].DocumentID != "doc-2" {
+		t.Fatalf("expected only doc-2's chunk to remain, got %+v", all)
+	}
+
+	doc, err := s.GetDocument("doc-1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if doc != nil {
+		t.Fatalf("expected document to be deleted, got %+v", doc)
+	}
+}
+
 func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
