@@ -5,13 +5,19 @@
 - SQLite via `modernc.org/sqlite` (pure Go, no CGO)
 - UUID generation via `github.com/google/uuid`
 - YAML config via `gopkg.in/yaml.v3`
-- PDF parsing via `github.com/razvandimescu/gopdf`
+- PDF parsing via `github.com/razvandimescu/gopdf` (no encryption support; its lexer stalls on undecodable content — see below)
+- PDF decryption/normalization via `github.com/pdfcpu/pdfcpu` (`api.Decrypt` with an empty user password, `api.DisableConfigDir` via `sync.OnceFunc` so no config dir is written)
 
 ## Development setup
 ```powershell
 go build -o go-rag.exe ./cmd/go-rag
 go test ./...
 ```
+
+## Gotchas
+- gopdf v0.9.5: `readKeyword` returns `Token{Type: TKeyword, Str: ""}` without advancing the position for delimiters `NextToken` does not handle (`)`, `{`, `}`), which makes `ExtractPageText` loop forever on content it cannot tokenize. `readablePageContent` (internal/parser/pdf.go) pre-scans each page with gopdf's own lexer and skips such pages — keep that guard whenever page content is lexed.
+- pdfcpu is the second-opinion reader for PDFs: it decrypts (empty user password), rebuilds damaged xref tables, and returns `pdfcpu.ErrNotEncrypted` / `ErrWrongPassword` (both matchable with `errors.Is`) for the non-encrypted / wrong-password cases.
+- The repository is checked out with CRLF line endings, so `gofmt -l` flags every file on Windows; check formatting of the specific files touched instead of reformatting the tree.
 
 ## Project structure
 ```

@@ -3,9 +3,11 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -207,8 +209,12 @@ func handleAdd() {
 	fmt.Printf("Parsing %s...\n", filePath)
 	parseResult, err := parser.ParseFile(filePath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error parsing file: %v\n", err)
+		printParseError(filePath, err)
 		os.Exit(1)
+	}
+
+	if parseResult.Decrypted {
+		fmt.Println("🔓 PDF was encrypted with an empty user password; it was decrypted automatically before parsing.")
 	}
 
 	if parseResult.Text == "" {
@@ -415,6 +421,42 @@ func handleAdd() {
 			fmt.Fprintf(os.Stderr, "Error updating status: %v\n", err)
 		}
 		fmt.Printf("\n✅ Successfully indexed %d chunks (ID: %s)\n", completedChunks, doc.ID)
+	}
+}
+
+// printParseError reports a ParseFile failure together with the hints that
+// help most. Encryption is called out explicitly: an encrypted PDF fails as "0
+// pages" or "no text extracted", which is easy to misread as a scanned or
+// wrong file.
+func printParseError(filePath string, err error) {
+	fmt.Fprintf(os.Stderr, "Error parsing file: %v\n", err)
+	for _, hint := range parseFailureHints(filePath, err) {
+		fmt.Fprintf(os.Stderr, "%s\n", hint)
+	}
+}
+
+// parseFailureHints returns follow-up hints for a ParseFile failure, empty when
+// none apply (path problems, non-PDF files the user can judge themselves).
+func parseFailureHints(filePath string, err error) []string {
+	if !strings.EqualFold(filepath.Ext(filePath), ".pdf") || errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+
+	if errors.Is(err, parser.ErrPDFEncrypted) {
+		return []string{
+			"Hint: this PDF is protected by a password go-rag does not have (it already tried an empty user password).",
+			"Decrypt it once, then add the decrypted copy:",
+			fmt.Sprintf("  qpdf --decrypt \"%s\" decrypted.pdf", filePath),
+			// The paths go through argv so no shell and no Python string has to
+			// quote a Windows path with its backslashes.
+			fmt.Sprintf("  python -c \"import pikepdf, sys; pikepdf.open(sys.argv[1]).save(sys.argv[2])\" \"%s\" decrypted.pdf   # also rebuilds a damaged xref", filePath),
+		}
+	}
+
+	return []string{
+		"Hint: go-rag already tries to decrypt password-protected PDFs (empty user password).",
+		"If that did not apply, the PDF may be scanned (image-only) and contain no text to extract —",
+		"run OCR on it first, or rebuild it with `qpdf --decrypt` / pikepdf and try again.",
 	}
 }
 
