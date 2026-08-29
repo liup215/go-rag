@@ -6,8 +6,34 @@ Orphan-chunk fix: `delete` now removes a document and all of its chunks in one
 transaction, every retrieval query joins `documents` so orphaned chunks can
 never surface as ghost results, and a new `go-rag gc` command cleans up
 orphans left in databases written by older versions.
+Follow-up CLI fix on top of the orphan-chunk work: `go-rag delete` now verifies
+the document exists **before** deleting (`deleteDocumentChecked`), so an unknown
+ID still exits 1 with "Error: document <id> not found", but deleting a document
+that exists without chunks (e.g. left behind by an interrupted add) succeeds
+with `(0 chunk(s) removed)` instead of a false "not found".
 
 ## Recent changes
+- `handleDelete` used to treat `chunksDeleted == 0` as proof the document was
+  missing — but the check ran after the delete, by which time the document was
+  gone either way. Reproduced end to end: a 0-chunk document disappeared from
+  `list`, yet the command printed `Error: document seed-0chunk not found` and
+  exited 1, which would break agent/script callers of `delete`.
+- `cmd/go-rag/main.go`: new `errDocumentNotFound` sentinel and
+  `deleteDocumentChecked(store, id)` helper (lookup → not-found error or
+  `DeleteDocument`); `handleDelete` maps the sentinel to the "not found"
+  message and everything else to "Error deleting document: …". Lookup errors
+  surface as `checking document <id>: …`.
+- Tests (`cmd/go-rag/main_test.go`): `TestDeleteDocumentChecked` — unknown ID
+  fails before `DeleteDocument` is attempted (event-order stub), 0-chunk
+  document succeeds with 0, chunk count propagates, lookup/delete errors
+  surface; `TestDeleteDocumentCheckedWithSQLite` — real-storage regression
+  pinning that `DeleteDocument` reports success with 0 chunks for both an
+  unknown ID and a chunk-less document.
+- Verified end to end against a seeded DB: 0-chunk delete → exit 0
+  `(0 chunk(s) removed)`; unknown ID → exit 1 `not found`; 2-chunk delete →
+  exit 0 `(2 chunk(s) removed)`; `gc --dry-run` shows no orphans afterwards.
+
+## Previous round (orphan-chunk fix, committed as 3019022)
 - **Root cause** (probe-verified): the DSN used mattn-style parameters
   (`_journal=WAL&_busy_timeout=5000&_fk=1`), but `modernc.org/sqlite` only
   honours `?_pragma=<statement>` — everything else is silently ignored. The
@@ -36,9 +62,8 @@ orphans left in databases written by older versions.
   document the contract that their chunk-loading storage methods join
   `documents`. No retriever-side doc lookups were added (they would be N+1 on
   the hot path).
-- `cmd/go-rag/main.go`: `handleDelete` uses the new signature, prints
-  `Document deleted successfully (N chunk(s) removed).`, and reports
-  `Error: document <id> not found` (exit 1) when the ID matches nothing;
+- `cmd/go-rag/main.go`: `handleDelete` prints
+  `Document deleted successfully (N chunk(s) removed).`;
   `handleAdd`'s failure cleanup discards the count. New `handleGC` backs
   `go-rag gc [--dry-run]`; `dry-run` was added to `booleanFlags`.
 - Tests: `TestForeignKeysEnabled` (pragma on + orphan insert rejected),
@@ -58,8 +83,20 @@ orphans left in databases written by older versions.
   position advance) — go-rag now guards around it locally.
 - Consider `--json` for `get-chunk` and `wiki` subcommands if scripting demand
   appears.
+- Environment: `go test -race ./internal/index` fails on this machine with
+  "Access is denied" while opening the staged `index.test.exe` — reproduces on
+  a pristine HEAD checkout, so it is AV/tooling, not a code race; the package
+  passes plain `go test` and `-race` is green for every other package.
 
 ## Active decisions
+- Existence is checked in the CLI **before** `DeleteDocument`, not derived from
+  the delete result: the storage call cannot distinguish an unknown ID from a
+  chunk-less document, and a post-delete lookup cannot either. A document that
+  vanishes between check and delete (concurrent winner) still reports success —
+  the end state matches the request.
+- `deleteDocumentChecked` is a testable helper (storage-in, error out) so the
+  ordering and exit semantics are pinned by unit tests instead of living inside
+  the `os.Exit`-heavy handler.
 - Orphan filtering lives in SQL (`chunkFrom` JOIN), consistent with the
   existing "filtering/searching lives in the storage layer" rule; the retriever
   stays storage-agnostic and documents the contract at the call sites.

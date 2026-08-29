@@ -64,6 +64,16 @@ The personal wiki ("wiki") is intentionally separate from the RAG pipeline:
 - **Write worker results**: ops travel through `writeCh` as `*writeOp`; a
   worker-filled field (e.g. `chunksDeleted`) may be read by the caller only
   after it receives from `op.result` (channel happens-before).
+- **Check before delete** (CLI): `DeleteDocument` reports success with 0 chunks
+  for both an unknown ID and a document that simply has no chunks, so the CLI
+  cannot infer existence from the delete result — once the delete has run the
+  document is gone either way. `deleteDocumentChecked`
+  (`cmd/go-rag/main.go`) therefore looks the document up first and fails with
+  `errDocumentNotFound` (exit 1, "Error: document <id> not found") before any
+  write happens; deleting a chunk-less document (e.g. left behind by an
+  interrupted add) is a success with `(0 chunk(s) removed)`. A document that
+  disappears between check and delete still reports success — the end state is
+  what the caller asked for.
 
 ## Document listing pattern
 - `storage.DocumentQuery` (`Search`, `Filters`, `Limit`, `Offset`) is the single input for `ListDocuments` and `CountDocuments`.

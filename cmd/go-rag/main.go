@@ -920,6 +920,32 @@ func handleList() {
 	}
 }
 
+// errDocumentNotFound reports that no document with the given ID exists.
+var errDocumentNotFound = errors.New("document not found")
+
+// deleteDocumentChecked deletes a document and its chunks after verifying that
+// the document exists, so callers can tell a typo'd/unknown ID apart from a
+// successful delete.
+//
+// The check happens BEFORE the delete. DeleteDocument reports success with a
+// chunk count of 0 for both an unknown ID and a document that simply has no
+// chunks, and once the delete has run the document is gone either way — a
+// post-delete lookup cannot distinguish the two and would misreport deleting a
+// chunk-less document (e.g. one left behind by an interrupted add) as "not
+// found". If the document disappears between the check and the delete (another
+// process won the race), the delete still succeeds and the end state — the
+// document gone — is what the caller asked for.
+func deleteDocumentChecked(store storage.Storage, id string) (int64, error) {
+	doc, err := store.GetDocument(id)
+	if err != nil {
+		return 0, fmt.Errorf("checking document %s: %w", id, err)
+	}
+	if doc == nil {
+		return 0, errDocumentNotFound
+	}
+	return store.DeleteDocument(id)
+}
+
 func handleDelete() {
 	if len(os.Args) < 3 {
 		fmt.Fprintf(os.Stderr, "Error: document ID required\n")
@@ -942,26 +968,19 @@ func handleDelete() {
 		fmt.Fprintf(os.Stderr, "Error initializing storage: %v\n", err)
 		os.Exit(1)
 	}
+	defer store.Close()
 
-	// Delete document and its chunks (cascade, in one transaction).
-	chunksDeleted, err := store.DeleteDocument(docID)
+	// Delete document and its chunks (cascade, in one transaction). The
+	// document is verified to exist first, so an unknown ID is an error rather
+	// than a silent success.
+	chunksDeleted, err := deleteDocumentChecked(store, docID)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error deleting document: %v\n", err)
-		os.Exit(1)
-	}
-
-	if chunksDeleted == 0 {
-		// Distinguish "never existed / already gone" from a real delete so a
-		// typo in the ID is not reported as success.
-		doc, err := store.GetDocument(docID)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error checking document: %v\n", err)
-			os.Exit(1)
-		}
-		if doc == nil {
+		if errors.Is(err, errDocumentNotFound) {
 			fmt.Fprintf(os.Stderr, "Error: document %s not found\n", docID)
-			os.Exit(1)
+		} else {
+			fmt.Fprintf(os.Stderr, "Error deleting document: %v\n", err)
 		}
+		os.Exit(1)
 	}
 
 	fmt.Printf("Document deleted successfully (%d chunk(s) removed).\n", chunksDeleted)
@@ -987,6 +1006,7 @@ func handleGC() {
 		fmt.Fprintf(os.Stderr, "Error initializing storage: %v\n", err)
 		os.Exit(1)
 	}
+	defer store.Close()
 
 	orphans, err := store.CountOrphanChunks()
 	if err != nil {

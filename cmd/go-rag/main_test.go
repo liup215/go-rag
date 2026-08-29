@@ -418,6 +418,153 @@ func TestNonNilDocuments(t *testing.T) {
 	}
 }
 
+// deleteStoreStub satisfies storage.Storage for deleteDocumentChecked tests by
+// embedding the interface and overriding only the two methods it uses. events
+// records the call order so tests can pin the existence check to before the
+// delete.
+type deleteStoreStub struct {
+	storage.Storage
+	exists map[string]bool
+	// deleteChunks is what DeleteDocument reports as removed; 0 mirrors the
+	// real storage for a document without chunks.
+	deleteChunks int64
+	getErr       error
+	deleteErr    error
+	events       []string
+}
+
+func (s *deleteStoreStub) GetDocument(id string) (*storage.Document, error) {
+	s.events = append(s.events, "get:"+id)
+	if s.getErr != nil {
+		return nil, s.getErr
+	}
+	if s.exists[id] {
+		return &storage.Document{ID: id, Name: "doc.txt", FilePath: "docs/doc.txt", DocType: "txt", Status: "indexed"}, nil
+	}
+	return nil, nil
+}
+
+func (s *deleteStoreStub) DeleteDocument(id string) (int64, error) {
+	s.events = append(s.events, "delete:"+id)
+	if s.deleteErr != nil {
+		return 0, s.deleteErr
+	}
+	return s.deleteChunks, nil
+}
+
+func TestDeleteDocumentChecked(t *testing.T) {
+	t.Run("unknown ID fails without attempting the delete", func(t *testing.T) {
+		stub := &deleteStoreStub{exists: map[string]bool{}}
+
+		n, err := deleteDocumentChecked(stub, "missing")
+		if !errors.Is(err, errDocumentNotFound) {
+			t.Fatalf("err = %v, want errDocumentNotFound", err)
+		}
+		if n != 0 {
+			t.Fatalf("chunks deleted = %d, want 0", n)
+		}
+		if !reflect.DeepEqual(stub.events, []string{"get:missing"}) {
+			t.Fatalf("events = %v, want only the existence check", stub.events)
+		}
+	})
+
+	// Regression: a document that exists but has no chunks (e.g. left behind by
+	// an interrupted add) used to be reported as "not found" — the existence
+	// check ran after the delete, when the document was already gone and both
+	// cases looked identical.
+	t.Run("existing document without chunks deletes successfully", func(t *testing.T) {
+		stub := &deleteStoreStub{exists: map[string]bool{"doc-0chunk": true}}
+
+		n, err := deleteDocumentChecked(stub, "doc-0chunk")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if n != 0 {
+			t.Fatalf("chunks deleted = %d, want 0", n)
+		}
+		if !reflect.DeepEqual(stub.events, []string{"get:doc-0chunk", "delete:doc-0chunk"}) {
+			t.Fatalf("events = %v, want check before delete", stub.events)
+		}
+	})
+
+	t.Run("existing document reports removed chunk count", func(t *testing.T) {
+		stub := &deleteStoreStub{
+			exists:       map[string]bool{"doc-1": true},
+			deleteChunks: 4,
+		}
+
+		n, err := deleteDocumentChecked(stub, "doc-1")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if n != 4 {
+			t.Fatalf("chunks deleted = %d, want 4", n)
+		}
+	})
+
+	t.Run("lookup failure surfaces without deleting", func(t *testing.T) {
+		wantErr := errors.New("disk I/O error")
+		stub := &deleteStoreStub{getErr: wantErr}
+
+		_, err := deleteDocumentChecked(stub, "doc-1")
+		if !errors.Is(err, wantErr) {
+			t.Fatalf("err = %v, want wrapped %v", err, wantErr)
+		}
+		if len(stub.events) != 1 {
+			t.Fatalf("events = %v, delete must not run when the lookup fails", stub.events)
+		}
+	})
+
+	t.Run("delete failure surfaces", func(t *testing.T) {
+		wantErr := errors.New("database is locked")
+		stub := &deleteStoreStub{
+			exists:    map[string]bool{"doc-1": true},
+			deleteErr: wantErr,
+		}
+
+		_, err := deleteDocumentChecked(stub, "doc-1")
+		if !errors.Is(err, wantErr) {
+			t.Fatalf("err = %v, want %v", err, wantErr)
+		}
+	})
+}
+
+// TestDeleteDocumentCheckedWithSQLite pins the storage behaviour that broke the
+// old handleDelete: DeleteDocument reports success with zero chunks for both an
+// unknown ID and a chunk-less document, so a post-delete existence check could
+// not tell them apart.
+func TestDeleteDocumentCheckedWithSQLite(t *testing.T) {
+	store, err := storage.NewStorage(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open storage: %v", err)
+	}
+	defer store.Close()
+
+	doc := &storage.Document{ID: "doc-0chunk", Name: "interrupted.txt", FilePath: "/tmp/interrupted.txt", DocType: "txt", Status: "pending"}
+	if err := store.CreateDocument(doc); err != nil {
+		t.Fatalf("create document: %v", err)
+	}
+
+	n, err := deleteDocumentChecked(store, "doc-0chunk")
+	if err != nil {
+		t.Fatalf("delete 0-chunk document: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("chunks deleted = %d, want 0", n)
+	}
+	if got, err := store.GetDocument("doc-0chunk"); err != nil || got != nil {
+		t.Fatalf("document should be gone, got %+v, err %v", got, err)
+	}
+
+	// Deleting it again — now genuinely absent — must be an error, not success.
+	if _, err := deleteDocumentChecked(store, "doc-0chunk"); !errors.Is(err, errDocumentNotFound) {
+		t.Fatalf("err = %v, want errDocumentNotFound", err)
+	}
+	if _, err := deleteDocumentChecked(store, "never-existed"); !errors.Is(err, errDocumentNotFound) {
+		t.Fatalf("err = %v, want errDocumentNotFound", err)
+	}
+}
+
 func TestReorderArgsBooleanFlags(t *testing.T) {
 	tests := []struct {
 		name string

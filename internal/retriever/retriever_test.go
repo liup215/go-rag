@@ -19,18 +19,18 @@ type mockStorage struct {
 	chunks []storage.Chunk
 }
 
-func (m *mockStorage) Close() error                                          { return nil }
-func (m *mockStorage) CreateDocument(doc *storage.Document) error            { return nil }
-func (m *mockStorage) UpdateDocumentStatus(id, status, errMsg string) error  { return nil }
-func (m *mockStorage) GetDocument(id string) (*storage.Document, error)      { return nil, nil }
+func (m *mockStorage) Close() error                                         { return nil }
+func (m *mockStorage) CreateDocument(doc *storage.Document) error           { return nil }
+func (m *mockStorage) UpdateDocumentStatus(id, status, errMsg string) error { return nil }
+func (m *mockStorage) GetDocument(id string) (*storage.Document, error)     { return nil, nil }
 func (m *mockStorage) ListDocuments(query storage.DocumentQuery) ([]storage.Document, error) {
 	return nil, nil
 }
 func (m *mockStorage) CountDocuments(query storage.DocumentQuery) (int, error) {
 	return 0, nil
 }
-func (m *mockStorage) DeleteDocument(id string) (int64, error) { return 0, nil }
-func (m *mockStorage) CreateChunk(chunk *storage.Chunk) error  { return nil }
+func (m *mockStorage) DeleteDocument(id string) (int64, error)   { return 0, nil }
+func (m *mockStorage) CreateChunk(chunk *storage.Chunk) error    { return nil }
 func (m *mockStorage) CreateChunks(chunks []storage.Chunk) error { return nil }
 func (m *mockStorage) GetChunkByIndex(docID string, index int) (*storage.Chunk, error) {
 	return nil, nil
@@ -50,19 +50,19 @@ func (m *mockStorage) GetAllChunks() ([]storage.Chunk, error) {
 func (m *mockStorage) SearchByKeyword(query string, limit int) ([]storage.Chunk, error) {
 	return m.chunks, nil
 }
-func (m *mockStorage) CountOrphanChunks() (int, error)  { return 0, nil }
-func (m *mockStorage) DeleteOrphanChunks() (int64, error) { return 0, nil }
-func (m *mockStorage) CreateWikiIndex(idx *storage.WikiIndex) error         { return nil }
-func (m *mockStorage) GetWikiIndex(id string) (*storage.WikiIndex, error)   { return nil, nil }
-func (m *mockStorage) ListWikiIndexes() ([]storage.WikiIndex, error)        { return nil, nil }
-func (m *mockStorage) DeleteWikiIndex(id string) error                        { return nil }
-func (m *mockStorage) CreateWikiEntry(entry *storage.WikiEntry) error       { return nil }
-func (m *mockStorage) GetWikiEntry(id string) (*storage.WikiEntry, error)   { return nil, nil }
+func (m *mockStorage) CountOrphanChunks() (int, error)                    { return 0, nil }
+func (m *mockStorage) DeleteOrphanChunks() (int64, error)                 { return 0, nil }
+func (m *mockStorage) CreateWikiIndex(idx *storage.WikiIndex) error       { return nil }
+func (m *mockStorage) GetWikiIndex(id string) (*storage.WikiIndex, error) { return nil, nil }
+func (m *mockStorage) ListWikiIndexes() ([]storage.WikiIndex, error)      { return nil, nil }
+func (m *mockStorage) DeleteWikiIndex(id string) error                    { return nil }
+func (m *mockStorage) CreateWikiEntry(entry *storage.WikiEntry) error     { return nil }
+func (m *mockStorage) GetWikiEntry(id string) (*storage.WikiEntry, error) { return nil, nil }
 func (m *mockStorage) ListWikiEntries(indexID string) ([]storage.WikiEntry, error) {
 	return nil, nil
 }
 func (m *mockStorage) UpdateWikiEntry(entry *storage.WikiEntry) error { return nil }
-func (m *mockStorage) DeleteWikiEntry(id string) error                  { return nil }
+func (m *mockStorage) DeleteWikiEntry(id string) error                { return nil }
 
 // mockEmbedder returns a fixed embedding for any input.
 type mockEmbedder struct {
@@ -341,8 +341,8 @@ func TestRetriever_EmptyStore(t *testing.T) {
 
 func TestTokenize(t *testing.T) {
 	cases := []struct {
-		input    string
-		wantLen  int
+		input     string
+		wantLen   int
 		wantFirst string
 	}{
 		{"Hello World", 2, "hello"},
