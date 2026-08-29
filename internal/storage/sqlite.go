@@ -33,6 +33,7 @@ const (
 	opCreateDocument writeOpType = iota
 	opUpdateDocumentStatus
 	opDeleteDocument
+	opDeleteOrphanChunks
 	opCreateChunk
 	opCreateChunks
 	opCreateWikiIndex
@@ -198,10 +199,11 @@ func (s *SQLiteStorage) sendWriteOp(opType writeOpType, payload interface{}) err
 	}
 }
 
-// sendWriteOpCascade sends a document delete to the worker and waits for its
-// result, returning the number of chunks removed alongside the document.
-func (s *SQLiteStorage) sendWriteOpCascade(id string) (int64, error) {
-	op := &writeOp{opType: opDeleteDocument, payload: id, result: make(chan error, 1)}
+// sendWriteOpCount sends a write op to the worker and waits for its result,
+// returning the number of rows the op removed (the chunks removed by a cascade
+// document delete, or by an orphan-chunk cleanup).
+func (s *SQLiteStorage) sendWriteOpCount(opType writeOpType, payload interface{}) (int64, error) {
+	op := &writeOp{opType: opType, payload: payload, result: make(chan error, 1)}
 	select {
 	case s.writeCh <- op:
 		err := <-op.result
@@ -244,6 +246,11 @@ func (s *SQLiteStorage) execWriteOp(op *writeOp) error {
 		op.chunksDeleted = n
 		return err
 
+	case opDeleteOrphanChunks:
+		n, err := s.deleteOrphanChunks()
+		op.chunksDeleted = n
+		return err
+
 	case opCreateChunk:
 		chunk := op.payload.(*Chunk)
 		var emb []byte
@@ -259,36 +266,41 @@ func (s *SQLiteStorage) execWriteOp(op *writeOp) error {
 
 	case opCreateChunks:
 		chunks := op.payload.([]Chunk)
-		tx, err := s.db.Begin()
-		if err != nil {
-			return err
-		}
-		defer tx.Rollback()
-
-		stmt, err := tx.Prepare(`
-			INSERT INTO chunks (id, document_id, text, chunk_index, embedding, created_at)
-			VALUES (?, ?, ?, ?, ?, ?)`)
-		if err != nil {
-			return err
-		}
-		defer stmt.Close()
-
-		now := time.Now().UTC()
-		for _, chunk := range chunks {
-			if chunk.ID == "" {
-				chunk.ID = uuid.NewString()
-			}
-
-			var emb []byte
-			if len(chunk.Embedding) > 0 {
-				emb = float32sToBytes(chunk.Embedding)
-			}
-
-			if _, err := stmt.Exec(chunk.ID, chunk.DocumentID, chunk.Text, chunk.Index, emb, now); err != nil {
+		// The whole batch is one transaction, so it is retried as a whole while
+		// the database is locked: a failed attempt rolls back, meaning a retry
+		// starts from scratch and cannot leave partial rows behind.
+		return withBusyRetry(func() error {
+			tx, err := s.db.Begin()
+			if err != nil {
 				return err
 			}
-		}
-		return tx.Commit()
+			defer tx.Rollback()
+
+			stmt, err := tx.Prepare(`
+				INSERT INTO chunks (id, document_id, text, chunk_index, embedding, created_at)
+				VALUES (?, ?, ?, ?, ?, ?)`)
+			if err != nil {
+				return err
+			}
+			defer stmt.Close()
+
+			now := time.Now().UTC()
+			for _, chunk := range chunks {
+				if chunk.ID == "" {
+					chunk.ID = uuid.NewString()
+				}
+
+				var emb []byte
+				if len(chunk.Embedding) > 0 {
+					emb = float32sToBytes(chunk.Embedding)
+				}
+
+				if _, err := stmt.Exec(chunk.ID, chunk.DocumentID, chunk.Text, chunk.Index, emb, now); err != nil {
+					return err
+				}
+			}
+			return tx.Commit()
+		})
 
 	case opCreateWikiIndex:
 		idx := op.payload.(*WikiIndex)
@@ -303,18 +315,23 @@ func (s *SQLiteStorage) execWriteOp(op *writeOp) error {
 		id := op.payload.(string)
 		// Delete entries first, then the index, within a single transaction.
 		// This avoids relying on per-connection foreign key pragma settings.
-		tx, err := s.db.Begin()
-		if err != nil {
-			return err
-		}
-		defer tx.Rollback()
-		if _, err := tx.Exec(`DELETE FROM wiki_entries WHERE index_id = ?`, id); err != nil {
-			return err
-		}
-		if _, err := tx.Exec(`DELETE FROM wiki_indexes WHERE id = ?`, id); err != nil {
-			return err
-		}
-		return tx.Commit()
+		// The transaction is retried as a whole while the database is locked: a
+		// failed attempt rolls back, so a retry cannot leave a half-deleted
+		// index behind.
+		return withBusyRetry(func() error {
+			tx, err := s.db.Begin()
+			if err != nil {
+				return err
+			}
+			defer tx.Rollback()
+			if _, err := tx.Exec(`DELETE FROM wiki_entries WHERE index_id = ?`, id); err != nil {
+				return err
+			}
+			if _, err := tx.Exec(`DELETE FROM wiki_indexes WHERE id = ?`, id); err != nil {
+				return err
+			}
+			return tx.Commit()
+		})
 
 	case opCreateWikiEntry:
 		entry := op.payload.(*WikiEntry)
@@ -525,7 +542,7 @@ func (s *SQLiteStorage) CountDocuments(query DocumentQuery) (int, error) {
 // DeleteDocument deletes a document and all of its chunks in one transaction,
 // returning the number of chunks that were removed.
 func (s *SQLiteStorage) DeleteDocument(id string) (int64, error) {
-	return s.sendWriteOpCascade(id)
+	return s.sendWriteOpCount(opDeleteDocument, id)
 }
 
 // deleteDocumentCascade removes a document and all of its chunks in a single
@@ -580,9 +597,18 @@ func (s *SQLiteStorage) CountOrphanChunks() (int, error) {
 }
 
 // DeleteOrphanChunks removes chunks whose document no longer exists and
-// returns how many were removed. The delete is a single statement, so it is
-// atomic on its own.
+// returns how many were removed. Like every mutation it goes through the
+// single write worker, so it cannot collide with a queued write for the
+// database lock; the single DELETE statement is atomic on its own.
 func (s *SQLiteStorage) DeleteOrphanChunks() (int64, error) {
+	return s.sendWriteOpCount(opDeleteOrphanChunks, nil)
+}
+
+// deleteOrphanChunks runs the orphan-chunk delete. Only the write worker calls
+// it. The single statement is atomic, so the busy-retry can safely re-run it in
+// full — that retry still matters here because the write queue only serialises
+// writes within this process, not against other go-rag processes.
+func (s *SQLiteStorage) deleteOrphanChunks() (int64, error) {
 	var deleted int64
 
 	err := withBusyRetry(func() error {
