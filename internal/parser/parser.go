@@ -10,8 +10,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
-
-	"github.com/razvandimescu/gopdf/pdf"
 )
 
 // ParseResult contains the parsed text and metadata.
@@ -19,6 +17,10 @@ type ParseResult struct {
 	Text     string
 	Title    string
 	FileType string
+	// Decrypted is set when the source PDF carried an /Encrypt dictionary and
+	// was transparently decrypted (empty user password) before parsing. Callers
+	// surface it so users know their file was protected.
+	Decrypted bool
 }
 
 // ParseFile parses a file and extracts text content.
@@ -147,62 +149,7 @@ func parseXML(content string) (*ParseResult, error) {
 	}, nil
 }
 
-// parsePDF parses PDF files using gopdf (pure Go).
-// gopdf reconstructs text lines and handles intra-word spacing internally,
-// avoiding the per-letter spacing problems seen with coordinate-based parsers.
-func parsePDF(data []byte) (*ParseResult, error) {
-	// Create a temporary file since gopdf needs a file path
-	tmpFile, err := os.CreateTemp("", "go-rag-*.pdf")
-	if err != nil {
-		return nil, fmt.Errorf("failed to create temp file: %w", err)
-	}
-	defer os.Remove(tmpFile.Name())
-
-	if _, err := tmpFile.Write(data); err != nil {
-		tmpFile.Close()
-		return nil, fmt.Errorf("failed to write temp file: %w", err)
-	}
-	tmpFile.Close()
-
-	// Open PDF
-	doc, err := pdf.OpenFile(tmpFile.Name())
-	if err != nil {
-		return nil, fmt.Errorf("open pdf: %w", err)
-	}
-
-	// Extract text from all pages
-	var all strings.Builder
-	for i := 0; i < doc.NumPages(); i++ {
-		page := doc.Page(i)
-		lines, err := page.TextLines()
-		if err != nil {
-			return nil, fmt.Errorf("extract page %d: %w", i+1, err)
-		}
-		for _, line := range lines {
-			if line.Text == "" {
-				continue
-			}
-			if all.Len() > 0 {
-				all.WriteByte('\n')
-			}
-			all.WriteString(line.Text)
-		}
-		if i < doc.NumPages()-1 && len(lines) > 0 {
-			all.WriteByte('\n')
-		}
-	}
-
-	result := strings.TrimSpace(all.String())
-	if result == "" {
-		return nil, fmt.Errorf("no text extracted from pdf")
-	}
-
-	return &ParseResult{
-		Text:     result,
-		FileType: ".pdf",
-	}, nil
-}
-
+// parsePDF parses PDF files; see pdf.go.
 // parseDOCX parses Word documents.
 func parseDOCX(data []byte) (*ParseResult, error) {
 	// DOCX is a ZIP file containing XML

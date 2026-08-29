@@ -9,6 +9,7 @@
 - Document listing with pagination, search, and filters (`--limit/--offset/--page/--search/--filter`), including total match count.
 - Search results enriched with their source document: human output shows Document Name/Path per hit; `search --json` carries `document_name`/`document_path` (resolved per distinct `Chunk.DocumentID` via `GetDocument`, missing documents degrade to empty strings / `(unknown)`).
 - Machine-readable JSON output: `search --json` prints `{query, count, results}` (document id/name/path, score, chunk id/index, text) and `list --json` prints `{total, offset, count, documents}`; default human output unchanged.
+- Encrypted PDF handling (`internal/parser/pdf.go`): a trailer `/Encrypt` entry routes to pdfcpu, which decrypts owner-password-protected files that open with an empty user password (and rebuilds a damaged xref), then the decrypted copy is parsed and `add` prints a 🔓 notice. Files with a real user password fail with `ErrPDFEncrypted` ("PDF is encrypted (owner password)") plus qpdf/pikepdf decryption hints, and text-less-but-decodable PDFs still report missing text (scanned) — three previously-identical failures are now distinguishable.
 - Document deletion.
 - Chunk lookup by document ID and index (`get-chunk`).
 - SQLite storage with WAL mode and serialized writes.
@@ -23,15 +24,18 @@
 
 ## Current status
 - Version: v0.4.0 (in development; last release tag `v0.3.0`).
-- Search↔document association and `--json` output for `search`/`list` implemented; all tests pass, `go vet` clean, binary builds, and CLI behaviour was smoke-tested end to end against a seeded SQLite DB.
+- Encrypted-PDF recognition/decryption implemented; all tests pass, `go vet` clean, binary builds, and CLI behaviour was smoke-tested end to end against pdfcpu-encrypted fixtures (empty user password → auto-decrypt + index; user password → explicit error + hints; encrypted text-less → missing-text error).
 
 ## Known issues
 - Document ingestion requires a configured embedding API key; local no-embedding mode is not supported.
 - `SQLiteStorage.SearchByKeyword` pre-filters with a single `LIKE '%<raw query>%'`, so multi-word Chinese queries ("机器学习 算法") return an empty candidate set before BM25 runs; the hybrid path (embedder configured) is unaffected because it loads all chunks.
 - Databases written before the `DeleteDocument` fix may contain orphan chunks; `GetAllChunks`/`SearchByKeyword` do not JOIN `documents`, so such legacy orphans still appear in results.
 - The modernc SQLite driver ignores the `_journal=WAL&_busy_timeout=5000&_fk=1` DSN params (only `_pragma=...` etc. are supported), so WAL/busy-timeout are not actually enabled; writes are safe because they are serialized through the worker goroutine.
+- gopdf v0.9.5 lexer bug (worked around, not fixed upstream): `readKeyword` returns an empty keyword *without advancing* for the delimiters `NextToken` does not handle (`)`, `{`, `}`), so `ExtractPageText` spins forever on content it cannot tokenize (e.g. ciphertext of an encrypted stream). `readablePageContent` in `internal/parser/pdf.go` pre-scans each page with gopdf's own lexer and skips pages that hit it; worth reporting upstream.
+
 
 ## Recent fixes
+- PDFs whose content gopdf cannot decode no longer hang the parser (`readablePageContent` guard, empty-keyword detection) and are skipped per page; when gopdf fails on structure or garbage, pdfcpu gets a second opinion before "no text extracted" is reported.
 - `reorderArgs` now knows about valueless flags (`booleanFlags`), so `go-rag search --json <query>` no longer swallows the query as the flag's value; `--flag=value` forms pass through untouched.
 - `DeleteDocument` left orphaned chunks: the modernc driver ignores the `_fk` DSN param, so foreign keys were off and `ON DELETE CASCADE` never fired — deleted documents' embedded chunks kept polluting `GetAllChunks`/`SearchByKeyword`. `opDeleteDocument` now removes chunks and the document in one transaction. Regression test `TestDeleteDocumentRemovesChunks` fails without the fix.
 - `add` no longer creates duplicate documents for the same file path (see "Duplicate ingestion guard" above).

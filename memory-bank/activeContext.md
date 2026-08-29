@@ -1,37 +1,101 @@
 # Active Context: go-rag
 
 ## Current work focus
-Duplicate ingestion guard for `go-rag add`: an already-indexed file path is skipped (exit 0) instead of creating a second document, and `--force` deletes the existing record(s) before re-indexing.
+Encrypted PDFs are now recognised instead of masquerading as "no text
+extracted from pdf" (the encryption-diagnosis item from progress.md's known
+issues). Owner-password-protected PDFs — the College Board AP documents: they
+open in every viewer without a prompt but refuse text extraction — are
+decrypted automatically; files with a real user password fail with an explicit
+encryption error plus decryption hints.
 
 ## Recent changes
-- Root cause of duplicate documents: `handleAdd` created a fresh `documents` row on every run; re-running `go-rag add file.pdf` duplicated the document and all chunks, polluting search and wasting embedding calls.
-- `cmd/go-rag/main.go` `handleAdd`:
-  - New `--force` flag. The input path is normalized with `filepath.Clean`, so `./report.pdf` and `report.pdf` map to one record.
-  - Storage is initialized right after the embedding-key check, then `documentsAtPath(store, path)` (exact `DocumentQuery` `path` filter) fetches existing records.
-  - Existing + no `--force` → `printDuplicateNotice` prints the newest doc ID, status, path and the `--force` hint, then `return` (exit 0). This happens BEFORE parsing, so duplicates cost zero parse work and zero embedding calls.
-  - Existing + `--force` → the existing record(s) are deleted only AFTER parse+chunk succeed (a parse failure never destroys already-indexed data), then the normal index flow runs. All same-path duplicates are removed, not just the newest.
-- Storage bug found and fixed en route (`internal/storage/sqlite.go` `opDeleteDocument`): the modernc driver only honors `_pragma`/`_time_format`/`_time_integer_format`/`_dqs`/`_error_rc` DSN params, so `_journal=WAL&_busy_timeout=5000&_fk=1` were silently ignored. Foreign keys were OFF, `ON DELETE CASCADE` never fired, and `DeleteDocument` left orphaned chunks (with embeddings) that `GetAllChunks`/`SearchByKeyword` kept returning. It now deletes chunks and the document in one transaction (same pattern as `DeleteWikiIndex`).
-- Verified end-to-end with a mock OpenAI-compatible embedding server: duplicate add prints the notice and exits 0 with zero embedding calls; `./`-prefixed path still skips; `--force` rebuild leaves exactly one document; total embedding texts served = 2 across 4 runs.
-- Tests: `TestDeleteDocumentRemovesChunks` (storage; fails without the fix), `TestDocumentsAtPath` + `TestForceReplaceCleansSamePathDocuments` (cmd/go-rag, real SQLite storage).
+- New `internal/parser/pdf.go` holding the whole PDF pipeline. `parsePDF` now
+  resolves encryption **before** gopdf touches content (gopdf has no decryption
+  support, and its lexer spins forever on the garbage it decodes from an
+  encrypted stream — see the bug below):
+  1. trailer declares `/Encrypt` → pdfcpu tries the empty user password
+     (`api.Decrypt`), which also rebuilds a damaged xref, then the decrypted
+     copy is parsed with `Decrypted: true`;
+  2. otherwise a plain gopdf parse runs; pages whose content gopdf cannot
+     decode are skipped (`readablePageContent` guard) instead of hanging;
+  3. if gopdf failed on the structure or decoded only garbage, pdfcpu gets a
+     second opinion before missing text is blamed on a scanner;
+  4. a file that rejects the empty password fails with `ErrPDFEncrypted`
+     ("PDF is encrypted (owner password)"), never with the old misleading
+     "no text extracted from pdf".
+- `ErrPDFEncrypted` is the sentinel for the encryption case; the wrapped text
+  always distinguishes "needs a password" from "has no text".
+- `ParseResult.Decrypted` (parser.go) reports that a source PDF carried
+  `/Encrypt` and was transparently decrypted; `add` prints a 🔓 notice.
+- `cmd/go-rag/main.go`: `printParseError` + `parseFailureHints` attach
+  follow-up advice — qpdf/pikepdf one-liners (paths passed via argv so no
+  shell has to quote a Windows path) for encryption, OCR/rebuild advice for
+  text-less PDFs, nothing for missing files or non-PDFs.
+- **gopdf bug found (upstream-worthy)**: `lexer.go readKeyword()` returns
+  `Token{Type: TKeyword, Str: ""}` *without advancing* for the delimiters its
+  `NextToken` switch does not handle (`)`, `{`, `}`), so the operator loop in
+  `extractTextWithResources` spins forever — 80 bytes of ciphertext produced
+  >20M tokens in the probe. The empty keyword is the only non-advancing token
+  the lexer can emit, which makes it a precise "cannot tokenize" signal, and
+  `readablePageContent` uses exactly it. Every other token consumes ≥1 byte,
+  so the guard loop is bound by the content length; it costs ~0% of extraction
+  (measured: 100-page extract 546µs, lexer-only pass below timer resolution).
+- `go.mod`: `github.com/pdfcpu/pdfcpu v0.15.0` (plus indirect deps) for
+  decryption; `sync.OnceFunc(api.DisableConfigDir)` keeps pdfcpu from writing
+  a config directory as a side effect.
+- Tests: `internal/parser/pdf_test.go` builds PDFs from real byte offsets
+  (`buildTestPDF(t, texts ...string)`, one page per text, "" = page without a
+  content stream) and encrypts them with pdfcpu (AES-256/128, RC4-128): plain
+  parse, empty-user-password decryption, user-password error, encrypted-but-
+  text-less, no pages, undecodable content (a stray `)` — the hang repro, now
+  deterministic), skip-only-the-broken-page, and `pdfHasEncryptDict`
+  (including the `/EncryptMetadata` non-match). `cmd/go-rag/main_test.go`
+  pins `parseFailureHints` per error class.
 
 ## Next steps
-- Databases may already hold orphan chunks from pre-fix deletions; `GetAllChunks`/`SearchByKeyword` have no JOIN to `documents`, so those legacy orphans still pollute results. Consider a read-side JOIN or a one-off cleanup.
+- Candidate follow-up (from known issues): `SQLiteStorage.SearchByKeyword`
+  LIKE-pre-filters on the raw query, so multi-word Chinese queries can return
+  an empty candidate set; tokenise into AND/OR LIKE clauses.
+- Consider upstreaming/reporting the gopdf lexer stall (empty keyword, no
+  position advance) — go-rag now guards around it locally.
+- Databases written before the `DeleteDocument` fix may contain orphan chunks; `GetAllChunks`/`SearchByKeyword` do not JOIN `documents`, so those legacy orphans still pollute results. Consider a read-side JOIN or a one-off cleanup.
 - The DSN silently ignores `_journal=WAL` and `_busy_timeout=5000`; switching to `_pragma=journal_mode(WAL)` / `_pragma=busy_timeout(5000)` (and optionally `_pragma=foreign_keys(1)`) would make the documented behavior real, but is a runtime behavior change left out of scope.
-- Known follow-up: `SQLiteStorage.SearchByKeyword` pre-filters with one `LIKE '%<query>%'` on the raw query, so a multi-word Chinese query ("机器学习 算法") returns an empty candidate set before BM25 runs. The hybrid path is unaffected (it loads all chunks).
-- Consider `--json` for `get-chunk` and `wiki` subcommands if scripting demand appears.
+- Consider `--json` for `get-chunk` and `wiki` subcommands if scripting demand
+  appears.
 
 ## Active decisions
-- Dedup reuses the existing `DocumentQuery` `path` exact filter instead of adding `GetDocumentByPath`: no interface/mock churn, and it returns ALL same-path records so `--force` cleans up legacy duplicates in one pass.
-- `--force` deletion is deferred until after parse+chunk succeed — "delete then re-index" holds, but a failure cannot destroy indexed data.
-- Only `filepath.Clean` normalization is applied (no TrimSpace, no absolute paths, no case folding); stored paths stay as the user typed them modulo cleaning.
-- Skip is a success outcome: stdout notice + exit 0, matching the task's requirement.
+- Encryption is checked *first* (trailer via gopdf, then a scan of the newest
+  xref section when gopdf cannot parse at all), because letting gopdf parse an
+  encrypted file risks the lexer spin. The scan excludes `/EncryptMetadata`
+  (a key of the encryption dictionary, not a declaration of encryption).
+- "All pages decoded, still no text" is treated as a scanned document and
+  returns immediately — no pdfcpu pass on the common scanned-PDF case.
+  "Pages that cannot be decoded" (or a page tree gopdf cannot walk) go to
+  pdfcpu, since that is how hidden encryption *and* damaged xref tables
+  present; pdfcpu only rewrites what it decrypted, so its success always means
+  "encrypted" and `Decrypted: true` is never a lie.
+- Undecodable pages are skipped, not fatal: one broken page must not cost the
+  text of the other 229. When *every* page is undecodable the error says so
+  ("all N pages hold data that cannot be decoded") instead of a bare
+  "no text extracted".
+- pdfcpu (not pikepdf) for decryption: pure-Go, already acceptable as a
+  dependency, and `api.Decrypt` performs the same normalization the manual
+  pikepdf workaround did.
+- Dedup reuses the existing `DocumentQuery` `path` exact filter (returns ALL same-path records so `--force` cleans up legacy duplicates in one pass); `--force` deletion deferred until after parse+chunk succeed; skip is a success outcome (exit 0).
+- Previous: document lookup for search results stays in the CLI layer via
+  `GetDocument` per distinct ID; JSON keys are snake_case and stable; JSON
+  output is opt-in per command; `reorderArgs`' bool-flag list is a
+  package-level map.
 
 ## Previous work
-- Search/document enrichment + `--json` output (task 9e96a0dc): `search` results now carry `document_name`/`document_path` (CLI-layer `GetDocument` per distinct ID, missing docs degrade to `(unknown)`); `search --json` prints `{query, count, results}` and `list --json` prints `{total, offset, count, documents}` (snake_case keys, empty sets as `[]`); `reorderArgs` gained a `booleanFlags` set so `search --json <query>` no longer swallows the query. Human-readable output otherwise unchanged.
-- BM25 CJK tokenisation: contiguous CJK runs split into overlapping bigrams + unigrams, CJK punctuation separates tokens (`internal/retriever`, `tokenize_cjk_test.go`).
-- Personal wiki subsystem (`go-rag wiki`), paginated/searchable `list`, SQLite with serialized writes.
-
-## Active decisions (earlier tasks)
-- Document lookup for search results stays in the CLI layer via `GetDocument` per distinct ID — top-k is small, avoids changing the `Storage` interface. Revisit with a single `GetDocuments(ids)`/join if top-k or N+1 concerns grow.
-- JSON keys are snake_case and stable regardless of hit state (no `omitempty` on name/path); JSON output is opt-in per command (`--json`); human-readable output stays byte-for-byte unchanged apart from the two added document lines in `search`.
+- Duplicate ingestion guard (task 64ea4259): `add` skips an already-indexed file path (exit 0, `printDuplicateNotice`) instead of creating a second document; `--force` deletes existing same-path record(s) only after parse+chunk succeed. Found+fixed en route: `opDeleteDocument` now removes chunks in one transaction (modernc driver ignores the `_fk` DSN param, so `ON DELETE CASCADE` never fired). Tests: `TestDeleteDocumentRemovesChunks`, `TestDocumentsAtPath`, `TestForceReplaceCleansSamePathDocuments`.
+- Search results identify their source document (`document_name`/`path`), and
+  `search`/`list` gained `--json` output with a stable schema (`[]`, never
+  `null`); `reorderArgs` learned boolean flags so `search --json <query>`
+  keeps the query.
+- CJK/BM25 tokenisation fix (bigrams + unigrams, punctuation separators) so
+  Chinese keyword queries actually recall chunks.
+- Personal wiki subsystem (`go-rag wiki`) with `wiki_indexes`/`wiki_entries`
+  tables, symbolic recall flow (index-list → list → get), and file-based body
+  create/update/export.
 

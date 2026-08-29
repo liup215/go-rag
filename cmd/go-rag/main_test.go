@@ -2,11 +2,15 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io/fs"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/liup215/go-rag/internal/parser"
 	"github.com/liup215/go-rag/internal/storage"
 )
 
@@ -438,6 +442,64 @@ func TestReorderArgsBooleanFlags(t *testing.T) {
 			got := reorderArgs(tt.in)
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Fatalf("reorderArgs(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestParseFailureHints pins the follow-up advice shown when `add` cannot parse
+// a file: encrypted PDFs must point at decryption, everything else PDF-ish at
+// scanning/normalization, and path problems must stay hint-free.
+func TestParseFailureHints(t *testing.T) {
+	pdfPath := filepath.Join("docs", "ap-biology-ced.pdf")
+	encrypted := fmt.Errorf("%w: the file does not open with an empty user password", parser.ErrPDFEncrypted)
+
+	tests := []struct {
+		name     string
+		filePath string
+		err      error
+		want     []string
+	}{
+		{
+			name:     "encrypted pdf",
+			filePath: pdfPath,
+			err:      encrypted,
+			want:     []string{"qpdf", "pikepdf"},
+		},
+		{
+			name:     "unencrypted pdf parse failure",
+			filePath: pdfPath,
+			err:      errors.New("no text extracted from pdf"),
+			want:     []string{"password-protected", "scanned"},
+		},
+		{
+			name:     "pdf does not exist",
+			filePath: pdfPath,
+			err:      fmt.Errorf("file not found: %w", fs.ErrNotExist),
+			want:     nil,
+		},
+		{
+			name:     "non-pdf file",
+			filePath: filepath.Join("notes", "todo.txt"),
+			err:      errors.New("no text extracted from pdf"),
+			want:     nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := parseFailureHints(tt.filePath, tt.err)
+			if len(got) == 0 && len(tt.want) == 0 {
+				return
+			}
+			if len(got) == 0 {
+				t.Fatalf("parseFailureHints(%q, %v) returned no hints, want mention of %q", tt.filePath, tt.err, tt.want)
+			}
+			joined := strings.Join(got, "\n")
+			for _, want := range tt.want {
+				if !strings.Contains(joined, want) {
+					t.Errorf("hints %q do not mention %q", joined, want)
+				}
 			}
 		})
 	}
