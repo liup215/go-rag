@@ -4,6 +4,7 @@
 - Configuration initialization and management.
 - Document ingestion with chunking and embedding batching.
 - Hybrid semantic + BM25 search with optional reranking and query rewriting.
+- Chinese/CJK keyword recall: BM25 tokenisation splits contiguous CJK runs into overlapping bigrams (+unigrams) and treats CJK punctuation as token separators, so Chinese queries match chunks containing those substrings.
 - Document listing with pagination, search, and filters (`--limit/--offset/--page/--search/--filter`), including total match count.
 - Document deletion.
 - Chunk lookup by document ID and index (`get-chunk`).
@@ -23,8 +24,10 @@
 
 ## Known issues
 - Document ingestion requires a configured embedding API key; local no-embedding mode is not supported.
+- `SQLiteStorage.SearchByKeyword` pre-filters with a single `LIKE '%<raw query>%'`, so multi-word Chinese queries ("机器学习 算法") return an empty candidate set before BM25 runs; the hybrid path (embedder configured) is unaffected because it loads all chunks.
 
 ## Recent fixes
+- BM25 tokenizer no longer treats every rune > 127 as a word character: CJK runs are split into bigrams + unigrams (`splitWordRun`/`cjkNgrams` in `internal/retriever`) and CJK punctuation separates tokens, fixing near-zero Chinese BM25 recall. Covered by `internal/retriever/tokenize_cjk_test.go`.
 - `init` command no longer overwrites an existing `config.yaml`; it reports "Configuration already initialized." instead.
 
 ## Evolution of decisions

@@ -1,27 +1,25 @@
 # Active Context: go-rag
 
 ## Current work focus
-Made `go-rag list` fully paginated and searchable so document libraries larger than 100 entries can be browsed and individual documents located quickly.
+Fixed BM25 tokenisation for Chinese/CJK text so the keyword branch of hybrid retrieval actually fires: contiguous CJK runs are split into bigrams (+unigrams) and CJK punctuation separates tokens.
 
 ## Recent changes
-- Introduced `storage.DocumentQuery` (`Search`, `Filters`, `Limit`, `Offset`).
-- `Storage.ListDocuments(query)` now applies search/filter/pagination; `limit 0` means no limit.
-- Added `Storage.CountDocuments(query)` so the CLI can report the total number of matches (limit/offset ignored).
-- Document search matches name and file path as a case-insensitive substring with LIKE wildcards (`%`, `_`, `\`) escaped.
-- Document filters support keys `status`, `type`/`doc_type`, `name`, `path`/`file_path`; repeated keys combine with SQL `IN` (OR), different keys combine with AND; unsupported keys return an error.
-- `go-rag list` gained `--limit` (default 100, 0 = all), `--offset`, `--page` (1-based, overrides `--offset`), `--search`, and repeatable `--filter key=value`.
-- `go-rag list` output now ends with `Showing <n> of <total> documents (offset <o>)` plus a next-page hint when more results remain.
-- Added pure CLI helpers `resolveListOffset` and `filterFlags` (a `flag.Value`), covered by new `cmd/go-rag/main_test.go`.
-- Updated usage/help text, README.md, and SKILL.md.
+- Root cause: `isWordChar` treated every rune > 127 (including CJK punctuation '，' '。') as a word character, so `splitWords` collapsed a whole Chinese sentence — sometimes a whole chunk — into a single token. BM25 could then only match when the query equalled that exact run, so Chinese keyword recall was effectively zero.
+- `internal/retriever/retriever.go`: `isWordChar` now accepts non-ASCII runes only when they are not punctuation/symbol/space/control (Unicode category based), so CJK punctuation acts as a separator.
+- New helpers `splitWordRun`, `cjkNgrams`, `isCJKRune`: contiguous CJK runs (Han/Kana/Hangul via `unicode.Is` script tables) split into overlapping bigrams with unigrams layered on top ("机器学习" → 机, 机器, 器, 器学, 学, 学习, 习); non-CJK sub-runs stay whole, so "GPT4模型" yields "gpt4" plus the 模型 n-grams.
+- ASCII word behaviour is unchanged (runs of `[0-9A-Za-z]` are one lower-cased token); existing `TestTokenize` cases pass untouched.
+- New tests in `internal/retriever/tokenize_cjk_test.go`: bigram/punctuation/single-char/mixed-script tokenisation, BM25 Chinese query matching ("机器学习" → chunk containing "…机器学习算法…"), single-char CJK query, retriever keyword and hybrid Chinese paths.
 
 ## Next steps
-- Observe how agents use the paginated list and iterate on ergonomics.
-- Possible follow-ups: JSON output mode, date-range filters, sorting options.
+- Known follow-up: `SQLiteStorage.SearchByKeyword` pre-filters with one `LIKE '%<query>%'` on the raw query, so a multi-word Chinese query ("机器学习 算法") returns an empty candidate set before BM25 runs. Consider tokenising the query into AND/OR LIKE clauses. The hybrid path is unaffected (it loads all chunks).
+- `BuildBM25Index` is rebuilt from all chunks on every search; consider caching if corpora grow (out of scope for now).
 
 ## Active decisions
-- Filtering/searching lives in the storage layer (SQL WHERE), not in the CLI, so totals and pages are always consistent.
+- CJK n-gram tokenisation emits bigrams **and** unigrams: bigrams carry the discriminative power, unigrams keep one-character queries matchable. Task explicitly allowed stacking unigrams.
+- Scripts needing n-grams are detected with stdlib script tables (`unicode.Is(unicode.Han|Hiragana|Katakana|Hangul, r)`), not hand-rolled ranges.
+- Tokenisation change is scoped to `internal/retriever` (`tokenize` is only used by `bm25.go`); storage LIKE pre-filter left as-is for now.
+- Previous: filtering/searching lives in the storage layer (SQL WHERE), not in the CLI; pagination defaults stay in the CLI (`--limit 100`); `0` means "no limit".
 - The `Storage` interface was changed in place (`ListDocuments(query)`) rather than adding a parallel filtered method — all call sites are internal.
-- Pagination defaults stay in the CLI (`--limit 100`); the storage layer treats `0` as "no limit" and rejects negative values.
 
 ## Previous work
 - Personal wiki subsystem (`go-rag wiki`) with `wiki_indexes`/`wiki_entries` tables, symbolic recall flow (index-list → list → get), and file-based body create/update/export.
