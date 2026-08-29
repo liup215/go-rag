@@ -7,6 +7,7 @@ import (
 	"math"
 	"sort"
 	"sync"
+	"unicode"
 
 	"github.com/liup215/go-rag/internal/embedder"
 	"github.com/liup215/go-rag/internal/storage"
@@ -496,6 +497,14 @@ func cosineSimilarity(a, b []float32) float64 {
 }
 
 // tokenize splits text into normalised tokens.
+//
+// ASCII words behave exactly as before: a run of [0-9A-Za-z] forms one
+// token, lower-cased.  CJK text (Chinese/Japanese/Korean) is written without
+// spaces, so a contiguous CJK run is additionally split into overlapping
+// bigrams with unigrams layered on top.  Without this a whole Chinese
+// sentence - sometimes a whole chunk - collapsed into a single token and
+// BM25 could only match when the query equalled that exact run, so Chinese
+// keyword recall was effectively zero.
 func tokenize(s string) []string {
 	words := splitWords(s)
 	for i := range words {
@@ -506,31 +515,94 @@ func tokenize(s string) []string {
 
 // Helper functions
 
+// splitWords splits text into word tokens.  Anything that is not a word rune
+// (whitespace, ASCII punctuation and CJK punctuation such as '，' and '。')
+// acts as a token separator; CJK word runs are then expanded into n-grams by
+// splitWordRun.
 func splitWords(s string) []string {
 	var words []string
 	var current []rune
 
+	flush := func() {
+		if len(current) == 0 {
+			return
+		}
+		words = append(words, splitWordRun(current)...)
+		current = current[:0]
+	}
+
 	for _, r := range s {
 		if isWordChar(r) {
 			current = append(current, r)
-		} else if len(current) > 0 {
-			words = append(words, string(current))
-			current = nil
+		} else {
+			flush()
 		}
 	}
-
-	if len(current) > 0 {
-		words = append(words, string(current))
-	}
+	flush()
 
 	return words
 }
 
+// splitWordRun turns one contiguous run of word runes into tokens.  The run
+// is first partitioned into maximal CJK and non-CJK sub-runs: CJK sub-runs
+// become n-grams, while every other sub-run (ASCII words, accented Latin,
+// ...) is kept whole so that e.g. "GPT4模型" yields "gpt4" plus the n-grams
+// of "模型".
+func splitWordRun(rs []rune) []string {
+	var words []string
+	start := 0
+	for i := 1; i <= len(rs); i++ {
+		if i == len(rs) || isCJKRune(rs[i]) != isCJKRune(rs[start]) {
+			if sub := rs[start:i]; isCJKRune(sub[0]) {
+				words = append(words, cjkNgrams(sub)...)
+			} else {
+				words = append(words, string(sub))
+			}
+			start = i
+		}
+	}
+	return words
+}
+
+// cjkNgrams splits a run of CJK characters into unigrams overlaid with
+// overlapping bigrams: "机器学习" yields "机", "机器", "器", "器学",
+// "学", "学习", "习".  Bigrams carry most of the discriminative power,
+// because single Chinese characters are highly ambiguous; unigrams keep
+// one-character queries matchable.
+func cjkNgrams(rs []rune) []string {
+	tokens := make([]string, 0, 2*len(rs))
+	for i, r := range rs {
+		tokens = append(tokens, string(r))
+		if i+1 < len(rs) {
+			tokens = append(tokens, string(r)+string(rs[i+1]))
+		}
+	}
+	return tokens
+}
+
+// isCJKRune reports whether r belongs to a CJK script (Han ideographs,
+// Kana or Hangul syllables).  These scripts are written without spaces and
+// therefore need n-gram tokenisation instead of word splitting.
+func isCJKRune(r rune) bool {
+	return unicode.Is(unicode.Han, r) ||
+		unicode.Is(unicode.Hiragana, r) ||
+		unicode.Is(unicode.Katakana, r) ||
+		unicode.Is(unicode.Hangul, r)
+}
+
+// isWordChar reports whether r belongs to a word.  ASCII alphanumerics always
+// do.  Non-ASCII runes do as well, unless they are punctuation, symbols,
+// spaces or control characters - which is what makes CJK punctuation
+// ('，' '。' '《》') separate tokens instead of gluing Chinese text into one
+// giant token.
 func isWordChar(r rune) bool {
-	return (r >= 'a' && r <= 'z') ||
-		(r >= 'A' && r <= 'Z') ||
-		(r >= '0' && r <= '9') ||
-		r > 127 // Non-ASCII (e.g., CJK)
+	if r < 128 {
+		return (r >= 'a' && r <= 'z') ||
+			(r >= 'A' && r <= 'Z') ||
+			(r >= '0' && r <= '9')
+	}
+	return !unicode.IsPunct(r) && !unicode.IsSymbol(r) &&
+		!unicode.IsSpace(r) && !unicode.IsControl(r)
 }
 
 func normalizeWord(s string) string {

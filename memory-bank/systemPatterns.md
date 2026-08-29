@@ -28,6 +28,13 @@ The personal wiki ("wiki") is intentionally separate from the RAG pipeline:
 - **No embeddings**: Retrieval is symbolic; no chunking or vector search is required.
 - **File-based body workflow**: `remember` and `update --file` read body from a file; `export` writes body to a file. This lets users edit large bodies with any editor while keeping SQLite as the truth source.
 
+## CJK keyword retrieval pattern
+- `tokenize` in `internal/retriever/retriever.go` is the single tokenizer used by `BuildBM25Index` for both documents and queries, so any tokenisation change automatically applies to both sides — keep them symmetric.
+- CJK runs (Han/Kana/Hangul detected via stdlib script tables `unicode.Is(unicode.Han|Hiragana|Katakana|Hangul, r)`) are split into overlapping bigrams plus unigrams (`cjkNgrams`); bigrams carry discriminative power, unigrams keep single-character queries matchable.
+- `isWordChar` accepts non-ASCII runes unless they are punctuation/symbol/space/control (Unicode categories), which makes CJK punctuation ('，' '。' '《》') a separator instead of part of a token. Mixed runs are partitioned into maximal CJK / non-CJK sub-runs (`splitWordRun`) so ASCII words stay whole ("GPT4模型" → "gpt4" + 模型 n-grams).
+- ASCII behaviour is pinned by tests: `[0-9A-Za-z]` runs are single lower-cased tokens; CJK coverage lives in `internal/retriever/tokenize_cjk_test.go`.
+- Known gap: the `keywordSearch` pre-filter `SearchByKeyword` LIKEs the raw query, so multi-word CJK queries can yield an empty candidate set before BM25 runs.
+
 ## Critical implementation paths
 - Adding a storage query requires updating the interface, SQLite implementation, and any mock implementations.
 - CLI flags use `flag.NewFlagSet` plus `reorderArgs` to allow flags after positional arguments.
