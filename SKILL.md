@@ -171,8 +171,12 @@ go-rag list --search report --filter status=indexed --limit 50 --page 2
 # Machine-readable output (preferred for agents and scripts)
 go-rag list --json
 
-# Delete a document
+# Delete a document (removes its chunks in the same transaction)
 go-rag delete <document-id>
+
+# Clean up chunks left behind by older deletes (preview first)
+go-rag gc --dry-run
+go-rag gc
 ```
 
 Supported `--filter` keys: `status`, `type`, `name`, `path`. The footer reports
@@ -334,6 +338,21 @@ go-rag config set embedding.api-key your-api-key
 go-rag uses SQLite with WAL mode. If you see locking errors:
 - Wait a moment and retry
 - Ensure no other go-rag process is running
+
+Multi-statement writes (document deletes, batch chunk inserts) are retried
+automatically while the database is locked, so transient contention resolves
+itself in most cases.
+
+### Ghost results from deleted documents
+
+Deleted documents are removed together with their chunks, and retrieval always
+joins the `documents` table, so chunks of deleted documents are never returned.
+If a database predates that fix and holds orphan chunks, reclaim them with:
+
+```bash
+go-rag gc --dry-run   # preview the count
+go-rag gc             # delete them
+```
 
 ## Configuration Reference
 

@@ -42,6 +42,29 @@ The personal wiki ("wiki") is intentionally separate from the RAG pipeline:
 - **Document deletion does the same**: `opDeleteDocument` deletes chunks then the document in one transaction. The `chunks.document_id` FK declares `ON DELETE CASCADE`, but the modernc driver ignores the `_fk` DSN param (only `_pragma=...` is supported), so cascade cannot be relied on. Any new parent/child delete must cascade explicitly.
 - **Duplicate ingestion guard**: `handleAdd` normalizes the input path with `filepath.Clean`, then `documentsAtPath` queries `DocumentQuery{Filters: {"path": {path}}}` (exact SQL match). Skip = stdout notice + `return` (exit 0) before parsing; `--force` deletes the existing records after parse+chunk succeed and before `CreateDocument`. Keep the decision logic in small helpers (`documentsAtPath`, `printDuplicateNotice`) so it can be unit-tested with real SQLite storage in `cmd/go-rag/main_test.go`.
 
+## Orphan-chunk prevention pattern
+- **Driver gotcha**: `modernc.org/sqlite` only parses `?_pragma=<statement>` DSN
+  parameters. mattn-style names (`_journal`, `_busy_timeout`, `_fk`) are
+  **silently ignored** — the original DSN left the database on
+  `journal_mode=delete` with `foreign_keys=0`, which is why `ON DELETE CASCADE`
+  never fired and deletes left orphan chunks. Always write pragmas as
+  `?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)`
+  (the driver pushes `busy_timeout` ahead of the others itself).
+- **Cascade delete**: `deleteDocumentCascade` deletes chunks, then the
+  document, in one transaction wrapped by `withBusyRetry` (bounded retries with
+  linear backoff on `SQLITE_BUSY`/`SQLITE_LOCKED`, detected via
+  `errors.As(*sqlite.Error)` + `Code()`). Explicit chunk deletion is kept even
+  with foreign keys enforced: pragma state is per-connection and the explicit
+  delete also handles legacy rows.
+- **No ghost results**: every chunk query that feeds retrieval or `get-chunk`
+  goes through `chunkSelect` + `chunkFrom` (`FROM chunks c JOIN documents d ON
+  d.id = c.document_id`). Orphan chunks are filtered in SQL, not in the
+  retriever — `hybridSearch`/`keywordSearch` document this contract at their
+  load sites.
+- **Write worker results**: ops travel through `writeCh` as `*writeOp`; a
+  worker-filled field (e.g. `chunksDeleted`) may be read by the caller only
+  after it receives from `op.result` (channel happens-before).
+
 ## Document listing pattern
 - `storage.DocumentQuery` (`Search`, `Filters`, `Limit`, `Offset`) is the single input for `ListDocuments` and `CountDocuments`.
 - SQL is assembled from a sorted key→column map (`documentFilterColumns`); unknown keys are rejected so bad filters fail loudly.

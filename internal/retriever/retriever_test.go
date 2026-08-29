@@ -29,7 +29,7 @@ func (m *mockStorage) ListDocuments(query storage.DocumentQuery) ([]storage.Docu
 func (m *mockStorage) CountDocuments(query storage.DocumentQuery) (int, error) {
 	return 0, nil
 }
-func (m *mockStorage) DeleteDocument(id string) error          { return nil }
+func (m *mockStorage) DeleteDocument(id string) (int64, error) { return 0, nil }
 func (m *mockStorage) CreateChunk(chunk *storage.Chunk) error  { return nil }
 func (m *mockStorage) CreateChunks(chunks []storage.Chunk) error { return nil }
 func (m *mockStorage) GetChunkByIndex(docID string, index int) (*storage.Chunk, error) {
@@ -50,6 +50,8 @@ func (m *mockStorage) GetAllChunks() ([]storage.Chunk, error) {
 func (m *mockStorage) SearchByKeyword(query string, limit int) ([]storage.Chunk, error) {
 	return m.chunks, nil
 }
+func (m *mockStorage) CountOrphanChunks() (int, error)  { return 0, nil }
+func (m *mockStorage) DeleteOrphanChunks() (int64, error) { return 0, nil }
 func (m *mockStorage) CreateWikiIndex(idx *storage.WikiIndex) error         { return nil }
 func (m *mockStorage) GetWikiIndex(id string) (*storage.WikiIndex, error)   { return nil, nil }
 func (m *mockStorage) ListWikiIndexes() ([]storage.WikiIndex, error)        { return nil, nil }

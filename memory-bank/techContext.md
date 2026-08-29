@@ -38,3 +38,12 @@ pkg/config/              YAML configuration
 - Use `go build ./cmd/go-rag` to build the binary.
 - Use `go test ./...` for validation.
 - Use `git` and `gh` for version control and releases.
+
+## SQLite driver notes
+- `modernc.org/sqlite` reads **only** `?_pragma=<statement>` (plus `_time_format`,
+  `_time_integer_format`, `_timezone`, `_txlock`, `_dqs`, `_error_rc`) from the
+  DSN. mattn-style `_journal`/`_busy_timeout`/`_fk` parameters are silently
+  ignored — check `PRAGMA journal_mode` / `PRAGMA foreign_keys` when in doubt.
+- Busy errors are `*sqlite.Error`; use `errors.As` and compare
+  `Code()` against `sqlite3.SQLITE_BUSY` / `sqlite3.SQLITE_LOCKED` from
+  `modernc.org/sqlite/lib`.

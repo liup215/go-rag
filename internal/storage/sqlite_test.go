@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -374,6 +375,264 @@ func TestGetChunkByIndexNotFound(t *testing.T) {
 	}
 	if chunk != nil {
 		t.Fatalf("expected nil chunk, got %+v", chunk)
+	}
+}
+
+// ---- Orphan chunks and cascade deletes -------------------------------------
+
+// seedOrphanChunk inserts a chunk row whose document does not exist, mimicking
+// databases written before foreign keys (and cascade deletes) were actually
+// enabled. Foreign keys are enforced on every pooled connection, so the insert
+// temporarily disables the pragma on a dedicated connection and restores it
+// afterwards.
+func seedOrphanChunk(t *testing.T, s *SQLiteStorage, id, docID, text string) {
+	t.Helper()
+
+	ctx := context.Background()
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("failed to get connection: %v", err)
+	}
+	defer conn.Close()
+
+	if _, err := conn.ExecContext(ctx, `PRAGMA foreign_keys = OFF`); err != nil {
+		t.Fatalf("failed to disable foreign keys: %v", err)
+	}
+	if _, err := conn.ExecContext(ctx,
+		// X'0000803F' is a little-endian float32 1.0, so the orphan is visible
+		// to GetAllChunks, which filters on embedding IS NOT NULL.
+		`INSERT INTO chunks (id, document_id, text, chunk_index, embedding) VALUES (?, ?, ?, 0, X'0000803F')`,
+		id, docID, text); err != nil {
+		t.Fatalf("failed to seed orphan chunk: %v", err)
+	}
+	if _, err := conn.ExecContext(ctx, `PRAGMA foreign_keys = ON`); err != nil {
+		t.Fatalf("failed to re-enable foreign keys: %v", err)
+	}
+}
+
+func chunkIDs(chunks []Chunk) []string {
+	ids := make([]string, 0, len(chunks))
+	for _, c := range chunks {
+		ids = append(ids, c.ID)
+	}
+	return ids
+}
+
+func TestForeignKeysEnabled(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	s, err := NewSQLiteStorage(dbPath)
+	if err != nil {
+		t.Fatalf("failed to create storage: %v", err)
+	}
+	defer s.Close()
+
+	var fk int
+	if err := s.db.QueryRow(`PRAGMA foreign_keys`).Scan(&fk); err != nil {
+		t.Fatalf("failed to read pragma: %v", err)
+	}
+	if fk != 1 {
+		t.Fatalf("expected foreign_keys pragma to be enabled, got %d", fk)
+	}
+
+	// The schema's foreign key must reject chunks whose document does not
+	// exist, so orphans cannot be created through the storage API.
+	chunk := &Chunk{ID: "chunk-orphan", DocumentID: "missing-doc", Text: "ghost", Index: 0}
+	if err := s.CreateChunk(chunk); err == nil {
+		t.Fatal("expected error creating a chunk for a non-existent document")
+	}
+}
+
+func TestDeleteDocumentCascadesChunks(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	s, err := NewSQLiteStorage(dbPath)
+	if err != nil {
+		t.Fatalf("failed to create storage: %v", err)
+	}
+	defer s.Close()
+
+	createTestDocument(t, s, "doc-1", "a.txt", "a.txt", "txt", "indexed")
+	createTestDocument(t, s, "doc-2", "b.txt", "b.txt", "txt", "indexed")
+
+	chunks := []Chunk{
+		{ID: "chunk-0", DocumentID: "doc-1", Text: "first", Index: 0, Embedding: []float32{1}},
+		{ID: "chunk-1", DocumentID: "doc-1", Text: "second", Index: 1, Embedding: []float32{1}},
+		{ID: "chunk-2", DocumentID: "doc-1", Text: "third", Index: 2, Embedding: []float32{1}},
+		{ID: "other-0", DocumentID: "doc-2", Text: "unrelated", Index: 0, Embedding: []float32{1}},
+	}
+	if err := s.CreateChunks(chunks); err != nil {
+		t.Fatalf("failed to create chunks: %v", err)
+	}
+
+	deleted, err := s.DeleteDocument("doc-1")
+	if err != nil {
+		t.Fatalf("failed to delete document: %v", err)
+	}
+	if deleted != 3 {
+		t.Fatalf("expected 3 chunks deleted, got %d", deleted)
+	}
+
+	doc, err := s.GetDocument("doc-1")
+	if err != nil {
+		t.Fatalf("failed to get document: %v", err)
+	}
+	if doc != nil {
+		t.Fatalf("expected document to be deleted, got %+v", doc)
+	}
+
+	remaining, err := s.GetChunksByDocument("doc-1")
+	if err != nil {
+		t.Fatalf("failed to get chunks: %v", err)
+	}
+	if len(remaining) != 0 {
+		t.Fatalf("expected no chunks left for deleted document, got %v", chunkIDs(remaining))
+	}
+
+	all, err := s.GetAllChunks()
+	if err != nil {
+		t.Fatalf("failed to get all chunks: %v", err)
+	}
+	if !sameIDs(chunkIDs(all), []string{"other-0"}) {
+		t.Fatalf("expected unrelated chunk to survive, got %v", chunkIDs(all))
+	}
+}
+
+func TestDeleteDocumentUnknown(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	s, err := NewSQLiteStorage(dbPath)
+	if err != nil {
+		t.Fatalf("failed to create storage: %v", err)
+	}
+	defer s.Close()
+
+	deleted, err := s.DeleteDocument("no-such-doc")
+	if err != nil {
+		t.Fatalf("expected nil error deleting unknown document, got %v", err)
+	}
+	if deleted != 0 {
+		t.Fatalf("expected 0 chunks deleted for unknown document, got %d", deleted)
+	}
+}
+
+func TestChunkQueriesExcludeOrphans(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	s, err := NewSQLiteStorage(dbPath)
+	if err != nil {
+		t.Fatalf("failed to create storage: %v", err)
+	}
+	defer s.Close()
+
+	createTestDocument(t, s, "doc-1", "a.txt", "a.txt", "txt", "indexed")
+
+	chunks := []Chunk{
+		{ID: "chunk-0", DocumentID: "doc-1", Text: "machine learning basics", Index: 0, Embedding: []float32{1}},
+		{ID: "chunk-1", DocumentID: "doc-1", Text: "deep learning details", Index: 1, Embedding: []float32{1}},
+	}
+	if err := s.CreateChunks(chunks); err != nil {
+		t.Fatalf("failed to create chunks: %v", err)
+	}
+
+	seedOrphanChunk(t, s, "orphan-0", "deleted-doc", "machine learning ghost")
+	seedOrphanChunk(t, s, "orphan-1", "deleted-doc", "another ghost")
+
+	// GetAllChunks feeds the hybrid search path.
+	all, err := s.GetAllChunks()
+	if err != nil {
+		t.Fatalf("failed to get all chunks: %v", err)
+	}
+	if !sameIDs(chunkIDs(all), []string{"chunk-0", "chunk-1"}) {
+		t.Fatalf("GetAllChunks returned orphan chunks: %v", chunkIDs(all))
+	}
+
+	// SearchByKeyword feeds the BM25-only keyword path. "learning" matches
+	// both live chunks and, without the join, the "machine learning ghost"
+	// orphan as well.
+	byKeyword, err := s.SearchByKeyword("learning", 50)
+	if err != nil {
+		t.Fatalf("failed to search by keyword: %v", err)
+	}
+	if !sameIDs(chunkIDs(byKeyword), []string{"chunk-0", "chunk-1"}) {
+		t.Fatalf("SearchByKeyword returned orphan chunks: %v", chunkIDs(byKeyword))
+	}
+
+	// GetChunksByDocument feeds the document-scoped keyword path.
+	byDoc, err := s.GetChunksByDocument("deleted-doc")
+	if err != nil {
+		t.Fatalf("failed to get chunks by document: %v", err)
+	}
+	if len(byDoc) != 0 {
+		t.Fatalf("GetChunksByDocument returned orphan chunks: %v", chunkIDs(byDoc))
+	}
+
+	// GetChunkByIndex feeds `go-rag get-chunk`.
+	chunk, err := s.GetChunkByIndex("deleted-doc", 0)
+	if err != nil {
+		t.Fatalf("failed to get chunk by index: %v", err)
+	}
+	if chunk != nil {
+		t.Fatalf("expected orphan chunk to be invisible, got %+v", chunk)
+	}
+}
+
+func TestCountAndDeleteOrphanChunks(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	s, err := NewSQLiteStorage(dbPath)
+	if err != nil {
+		t.Fatalf("failed to create storage: %v", err)
+	}
+	defer s.Close()
+
+	createTestDocument(t, s, "doc-1", "a.txt", "a.txt", "txt", "indexed")
+	chunks := []Chunk{
+		{ID: "chunk-0", DocumentID: "doc-1", Text: "keep me", Index: 0, Embedding: []float32{1}},
+	}
+	if err := s.CreateChunks(chunks); err != nil {
+		t.Fatalf("failed to create chunks: %v", err)
+	}
+	// 69 orphans, as in the production incident that motivated this fix.
+	for i := 0; i < 69; i++ {
+		seedOrphanChunk(t, s, fmt.Sprintf("orphan-%d", i), "deleted-doc", "ghost text")
+	}
+
+	count, err := s.CountOrphanChunks()
+	if err != nil {
+		t.Fatalf("failed to count orphan chunks: %v", err)
+	}
+	if count != 69 {
+		t.Fatalf("expected 69 orphan chunks, got %d", count)
+	}
+
+	deleted, err := s.DeleteOrphanChunks()
+	if err != nil {
+		t.Fatalf("failed to delete orphan chunks: %v", err)
+	}
+	if deleted != 69 {
+		t.Fatalf("expected 69 orphans deleted, got %d", deleted)
+	}
+
+	count, err = s.CountOrphanChunks()
+	if err != nil {
+		t.Fatalf("failed to recount orphan chunks: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected 0 orphan chunks after gc, got %d", count)
+	}
+
+	all, err := s.GetAllChunks()
+	if err != nil {
+		t.Fatalf("failed to get all chunks: %v", err)
+	}
+	if !sameIDs(chunkIDs(all), []string{"chunk-0"}) {
+		t.Fatalf("expected live chunk to survive gc, got %v", chunkIDs(all))
 	}
 }
 
