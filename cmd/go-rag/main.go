@@ -31,7 +31,8 @@ const version = "v0.4.0"
 // token after them as the flag's value, so "go-rag search --json <query>"
 // keeps the query as a positional argument.
 var booleanFlags = map[string]bool{
-	"json": true,
+	"json":    true,
+	"dry-run": true,
 }
 
 // reorderArgs moves flags (and their values) before positional arguments.
@@ -83,6 +84,8 @@ func main() {
 		handleList()
 	case "delete":
 		handleDelete()
+	case "gc":
+		handleGC()
 	case "get-chunk":
 		handleGetChunk()
 	case "config":
@@ -126,7 +129,9 @@ func printUsage() {
 	fmt.Println("    --search <text>       Only show documents whose name or path contains text")
 	fmt.Println("    --filter <key=value>  Exact match filter, repeatable (status, type, name, path)")
 	fmt.Println("    --json                Output machine-readable JSON (total, offset, documents)")
-	fmt.Println("  delete <doc-id>         Delete a document")
+	fmt.Println("  delete <doc-id>         Delete a document and its chunks")
+	fmt.Println("  gc                      Remove chunks whose document no longer exists")
+	fmt.Println("    --dry-run             Report what would be deleted without deleting")
 	fmt.Println("  get-chunk <doc-id>      Get a chunk by document ID and index")
 	fmt.Println("    --index <n>           Chunk index (required)")
 	fmt.Println("  config <set|get|list|help>       Manage configuration")
@@ -262,7 +267,7 @@ func handleAdd() {
 	if len(existing) > 0 {
 		fmt.Printf("⚠ --force: removing %d existing document(s) at this path\n", len(existing))
 		for _, old := range existing {
-			if err := store.DeleteDocument(old.ID); err != nil {
+			if _, err := store.DeleteDocument(old.ID); err != nil {
 				fmt.Fprintf(os.Stderr, "Error removing existing document %s: %v\n", old.ID, err)
 				os.Exit(1)
 			}
@@ -441,7 +446,7 @@ func handleAdd() {
 
 	// Update status or clean up on failure
 	if hasErrors {
-		if err := store.DeleteDocument(doc.ID); err != nil {
+		if _, err := store.DeleteDocument(doc.ID); err != nil {
 			fmt.Fprintf(os.Stderr, "Error cleaning up document after failure: %v\n", err)
 		}
 		fmt.Printf("\n⚠ Indexing failed: %d batch(es) failed. Document and chunks have been removed.\n", failedBatches)
@@ -915,6 +920,32 @@ func handleList() {
 	}
 }
 
+// errDocumentNotFound reports that no document with the given ID exists.
+var errDocumentNotFound = errors.New("document not found")
+
+// deleteDocumentChecked deletes a document and its chunks after verifying that
+// the document exists, so callers can tell a typo'd/unknown ID apart from a
+// successful delete.
+//
+// The check happens BEFORE the delete. DeleteDocument reports success with a
+// chunk count of 0 for both an unknown ID and a document that simply has no
+// chunks, and once the delete has run the document is gone either way — a
+// post-delete lookup cannot distinguish the two and would misreport deleting a
+// chunk-less document (e.g. one left behind by an interrupted add) as "not
+// found". If the document disappears between the check and the delete (another
+// process won the race), the delete still succeeds and the end state — the
+// document gone — is what the caller asked for.
+func deleteDocumentChecked(store storage.Storage, id string) (int64, error) {
+	doc, err := store.GetDocument(id)
+	if err != nil {
+		return 0, fmt.Errorf("checking document %s: %w", id, err)
+	}
+	if doc == nil {
+		return 0, errDocumentNotFound
+	}
+	return store.DeleteDocument(id)
+}
+
 func handleDelete() {
 	if len(os.Args) < 3 {
 		fmt.Fprintf(os.Stderr, "Error: document ID required\n")
@@ -937,14 +968,71 @@ func handleDelete() {
 		fmt.Fprintf(os.Stderr, "Error initializing storage: %v\n", err)
 		os.Exit(1)
 	}
+	defer store.Close()
 
-	// Delete document
-	if err := store.DeleteDocument(docID); err != nil {
-		fmt.Fprintf(os.Stderr, "Error deleting document: %v\n", err)
+	// Delete document and its chunks (cascade, in one transaction). The
+	// document is verified to exist first, so an unknown ID is an error rather
+	// than a silent success.
+	chunksDeleted, err := deleteDocumentChecked(store, docID)
+	if err != nil {
+		if errors.Is(err, errDocumentNotFound) {
+			fmt.Fprintf(os.Stderr, "Error: document %s not found\n", docID)
+		} else {
+			fmt.Fprintf(os.Stderr, "Error deleting document: %v\n", err)
+		}
 		os.Exit(1)
 	}
 
-	fmt.Println("Document deleted successfully.")
+	fmt.Printf("Document deleted successfully (%d chunk(s) removed).\n", chunksDeleted)
+}
+
+// handleGC removes orphan chunks — chunks whose document no longer exists.
+// Such rows are historical leftovers from deletes issued before cascade
+// deletes were reliable; today's deletes remove chunks in the same
+// transaction, so gc is only needed to clean up pre-existing databases.
+func handleGC() {
+	fs := flag.NewFlagSet("gc", flag.ExitOnError)
+	dryRun := fs.Bool("dry-run", false, "Report what would be deleted without deleting")
+	fs.Parse(reorderArgs(os.Args[2:]))
+
+	cfg, err := config.Load()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error loading config: %v\n", err)
+		os.Exit(1)
+	}
+
+	store, err := storage.NewStorage(cfg.Storage.Path)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error initializing storage: %v\n", err)
+		os.Exit(1)
+	}
+	defer store.Close()
+
+	orphans, err := store.CountOrphanChunks()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error counting orphan chunks: %v\n", err)
+		os.Exit(1)
+	}
+
+	if orphans == 0 {
+		fmt.Println("No orphan chunks found.")
+		return
+	}
+
+	fmt.Printf("Found %d orphan chunk(s) whose document no longer exists.\n", orphans)
+
+	if *dryRun {
+		fmt.Println("Dry run: nothing deleted. Run 'go-rag gc' to remove them.")
+		return
+	}
+
+	deleted, err := store.DeleteOrphanChunks()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error deleting orphan chunks: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Deleted %d orphan chunk(s).\n", deleted)
 }
 
 func handleGetChunk() {

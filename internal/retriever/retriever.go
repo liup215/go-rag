@@ -304,6 +304,8 @@ func appendUniqueStrings(base []string, values ...string) []string {
 // same candidate set, then fuses the ranked lists with RRF.
 func (r *Retriever) hybridSearch(ctx context.Context, opts SearchOptions) ([]storage.SearchResult, error) {
 	// Load all embedded chunks once; they are used for both retrieval methods.
+	// GetAllChunks joins documents, so chunks whose document has been deleted
+	// are excluded here and can never surface as ghost results.
 	chunks, err := r.storage.GetAllChunks()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get chunks: %w", err)
@@ -410,6 +412,8 @@ func (r *Retriever) vectorSearchOnChunks(
 }
 
 // keywordSearch performs BM25-based keyword search without a vector embedder.
+// Both chunk-loading methods below join documents in the storage layer, so
+// orphaned chunks of deleted documents are filtered out before scoring.
 func (r *Retriever) keywordSearch(opts SearchOptions) ([]storage.SearchResult, error) {
 	var chunks []storage.Chunk
 	var err error

@@ -75,13 +75,22 @@ type Storage interface {
 	GetDocument(id string) (*Document, error)
 	ListDocuments(query DocumentQuery) ([]Document, error)
 	CountDocuments(query DocumentQuery) (int, error)
-	DeleteDocument(id string) error
+	// DeleteDocument removes a document and all of its chunks in a single
+	// transaction. It returns the number of chunks that were removed together
+	// with the document.
+	DeleteDocument(id string) (int64, error)
 	CreateChunk(chunk *Chunk) error
 	CreateChunks(chunks []Chunk) error
 	GetChunkByIndex(docID string, index int) (*Chunk, error)
 	GetChunksByDocument(docID string) ([]Chunk, error)
 	GetAllChunks() ([]Chunk, error)
 	SearchByKeyword(query string, limit int) ([]Chunk, error)
+
+	// Orphan chunk maintenance. A chunk is an orphan when its document no
+	// longer exists — data left behind by deletes issued before cascade
+	// deletes were reliable.
+	CountOrphanChunks() (int, error)
+	DeleteOrphanChunks() (int64, error)
 
 	// Wiki index management.
 	CreateWikiIndex(idx *WikiIndex) error

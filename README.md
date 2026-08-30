@@ -151,6 +151,31 @@ With `--json`, `list` prints `{total, offset, count, documents}` — the same
 filters, paging, and totals apply, and empty pages serialize as `[]` instead
 of a message.
 
+### 7. Delete documents and clean up orphan chunks
+
+`delete` removes the document **and all of its chunks in one transaction**:
+either both disappear, or — if the delete fails, for example because the
+database is locked — nothing changes. The command reports how many chunks were
+removed.
+
+```bash
+go-rag delete <doc-id>
+# Document deleted successfully (4 chunk(s) removed).
+```
+
+Databases written by versions where that cascade was not reliable may still
+hold **orphan chunks** (chunks whose document row is gone). They never surface
+in search results — every retrieval query joins the `documents` table — but you
+can reclaim the space with `gc`:
+
+```bash
+# Preview how many orphan chunks would be removed
+go-rag gc --dry-run
+
+# Remove them
+go-rag gc
+```
+
 ## Commands
 
 | Command | Description |
@@ -159,7 +184,8 @@ of a message.
 | `add <file>` | Add a document to the knowledge base (skips already indexed paths; `--force` re-indexes) |
 | `search <query>` | Search the knowledge base |
 | `list` | List documents with pagination, search, and filters |
-| `delete <doc-id>` | Delete a document |
+| `delete <doc-id>` | Delete a document together with all of its chunks |
+| `gc` | Remove chunks whose document no longer exists (`--dry-run` to preview) |
 | `get-chunk <doc-id>` | Get a chunk by document ID and index |
 | `wiki index-list` | List personal wiki indexes (topics) |
 | `wiki index-create <title>` | Create a personal wiki index |

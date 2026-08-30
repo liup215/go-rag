@@ -3,6 +3,7 @@ package storage
 import (
 	"database/sql"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,7 +13,17 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	_ "modernc.org/sqlite"
+	sqlite "modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
+)
+
+// Lock-wait constants for the outer retry loop around multi-statement writes.
+// The driver's busy_timeout pragma already waits inside SQLite for the lock;
+// the retry covers the residual cases a busy timeout cannot resolve, such as
+// a COMMIT that could not upgrade to an exclusive lock.
+const (
+	busyRetryAttempts = 5
+	busyRetryDelay    = 200 * time.Millisecond
 )
 
 // writeOpType identifies the kind of write operation to be executed serially.
@@ -22,6 +33,7 @@ const (
 	opCreateDocument writeOpType = iota
 	opUpdateDocumentStatus
 	opDeleteDocument
+	opDeleteOrphanChunks
 	opCreateChunk
 	opCreateChunks
 	opCreateWikiIndex
@@ -32,10 +44,14 @@ const (
 )
 
 // writeOp represents a single database write request sent to the worker.
+// Ops are passed by pointer so the worker can return extra results (such as
+// the number of chunks removed by a cascade delete) to the waiting caller:
+// reading the field is safe after receiving from op.result.
 type writeOp struct {
-	opType  writeOpType
-	payload interface{}
-	result  chan error
+	opType        writeOpType
+	payload       interface{}
+	result        chan error
+	chunksDeleted int64
 }
 
 // SQLiteStorage implements storage using SQLite database.
@@ -43,7 +59,7 @@ type writeOp struct {
 // writeCh to avoid SQLITE_BUSY errors from concurrent writes.
 type SQLiteStorage struct {
 	db      *sql.DB
-	writeCh chan writeOp
+	writeCh chan *writeOp
 	done    chan struct{}
 	wg      sync.WaitGroup
 }
@@ -56,8 +72,13 @@ func NewSQLiteStorage(dbPath string) (*SQLiteStorage, error) {
 		return nil, fmt.Errorf("failed to create directory: %w", err)
 	}
 
-	// Open database with WAL mode for better concurrency
-	db, err := sql.Open("sqlite", dbPath+"?_journal=WAL&_busy_timeout=5000&_fk=1")
+	// Open database. modernc.org/sqlite only honours `?_pragma=<statement>`
+	// query parameters; the mattn-style names used previously (`_journal`,
+	// `_busy_timeout`, `_fk`) were silently ignored, so foreign keys — and with
+	// them the schema's ON DELETE CASCADE — were never actually enabled, which
+	// is what let deleted documents leave orphan chunks behind. The driver
+	// pushes busy_timeout ahead of the other pragmas itself.
+	db, err := sql.Open("sqlite", dbPath+"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)")
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
@@ -74,7 +95,7 @@ func NewSQLiteStorage(dbPath string) (*SQLiteStorage, error) {
 
 	s := &SQLiteStorage{
 		db:      db,
-		writeCh: make(chan writeOp, 64),
+		writeCh: make(chan *writeOp, 64),
 		done:    make(chan struct{}),
 	}
 	s.startWorker()
@@ -168,20 +189,33 @@ drained:
 
 // sendWriteOp sends an operation to the worker and waits for its result.
 // Returns an error if the storage has already been closed.
-func (s *SQLiteStorage) sendWriteOp(op writeOp) error {
-	result := make(chan error, 1)
-	op.result = result
+func (s *SQLiteStorage) sendWriteOp(opType writeOpType, payload interface{}) error {
+	op := &writeOp{opType: opType, payload: payload, result: make(chan error, 1)}
 	select {
 	case s.writeCh <- op:
-		return <-result
+		return <-op.result
 	case <-s.done:
 		return fmt.Errorf("storage closed")
 	}
 }
 
+// sendWriteOpCount sends a write op to the worker and waits for its result,
+// returning the number of rows the op removed (the chunks removed by a cascade
+// document delete, or by an orphan-chunk cleanup).
+func (s *SQLiteStorage) sendWriteOpCount(opType writeOpType, payload interface{}) (int64, error) {
+	op := &writeOp{opType: opType, payload: payload, result: make(chan error, 1)}
+	select {
+	case s.writeCh <- op:
+		err := <-op.result
+		return op.chunksDeleted, err
+	case <-s.done:
+		return 0, fmt.Errorf("storage closed")
+	}
+}
+
 // execWriteOp performs the actual database write for a writeOp.
 // It is always executed by the single worker goroutine.
-func (s *SQLiteStorage) execWriteOp(op writeOp) error {
+func (s *SQLiteStorage) execWriteOp(op *writeOp) error {
 	switch op.opType {
 	case opCreateDocument:
 		doc := op.payload.(*Document)
@@ -207,23 +241,15 @@ func (s *SQLiteStorage) execWriteOp(op writeOp) error {
 
 	case opDeleteDocument:
 		id := op.payload.(string)
-		// Delete chunks first, then the document, within a single transaction.
-		// The schema declares ON DELETE CASCADE on chunks, but the modernc
-		// driver ignores the _fk DSN parameter, so foreign key enforcement is
-		// not guaranteed; deleting explicitly prevents orphaned chunks (which
-		// would keep polluting GetAllChunks/SearchByKeyword).
-		tx, err := s.db.Begin()
-		if err != nil {
-			return err
-		}
-		defer tx.Rollback()
-		if _, err := tx.Exec(`DELETE FROM chunks WHERE document_id = ?`, id); err != nil {
-			return err
-		}
-		if _, err := tx.Exec(`DELETE FROM documents WHERE id = ?`, id); err != nil {
-			return err
-		}
-		return tx.Commit()
+
+		n, err := s.deleteDocumentCascade(id)
+		op.chunksDeleted = n
+		return err
+
+	case opDeleteOrphanChunks:
+		n, err := s.deleteOrphanChunks()
+		op.chunksDeleted = n
+		return err
 
 	case opCreateChunk:
 		chunk := op.payload.(*Chunk)
@@ -240,36 +266,41 @@ func (s *SQLiteStorage) execWriteOp(op writeOp) error {
 
 	case opCreateChunks:
 		chunks := op.payload.([]Chunk)
-		tx, err := s.db.Begin()
-		if err != nil {
-			return err
-		}
-		defer tx.Rollback()
-
-		stmt, err := tx.Prepare(`
-			INSERT INTO chunks (id, document_id, text, chunk_index, embedding, created_at)
-			VALUES (?, ?, ?, ?, ?, ?)`)
-		if err != nil {
-			return err
-		}
-		defer stmt.Close()
-
-		now := time.Now().UTC()
-		for _, chunk := range chunks {
-			if chunk.ID == "" {
-				chunk.ID = uuid.NewString()
-			}
-
-			var emb []byte
-			if len(chunk.Embedding) > 0 {
-				emb = float32sToBytes(chunk.Embedding)
-			}
-
-			if _, err := stmt.Exec(chunk.ID, chunk.DocumentID, chunk.Text, chunk.Index, emb, now); err != nil {
+		// The whole batch is one transaction, so it is retried as a whole while
+		// the database is locked: a failed attempt rolls back, meaning a retry
+		// starts from scratch and cannot leave partial rows behind.
+		return withBusyRetry(func() error {
+			tx, err := s.db.Begin()
+			if err != nil {
 				return err
 			}
-		}
-		return tx.Commit()
+			defer tx.Rollback()
+
+			stmt, err := tx.Prepare(`
+				INSERT INTO chunks (id, document_id, text, chunk_index, embedding, created_at)
+				VALUES (?, ?, ?, ?, ?, ?)`)
+			if err != nil {
+				return err
+			}
+			defer stmt.Close()
+
+			now := time.Now().UTC()
+			for _, chunk := range chunks {
+				if chunk.ID == "" {
+					chunk.ID = uuid.NewString()
+				}
+
+				var emb []byte
+				if len(chunk.Embedding) > 0 {
+					emb = float32sToBytes(chunk.Embedding)
+				}
+
+				if _, err := stmt.Exec(chunk.ID, chunk.DocumentID, chunk.Text, chunk.Index, emb, now); err != nil {
+					return err
+				}
+			}
+			return tx.Commit()
+		})
 
 	case opCreateWikiIndex:
 		idx := op.payload.(*WikiIndex)
@@ -284,18 +315,23 @@ func (s *SQLiteStorage) execWriteOp(op writeOp) error {
 		id := op.payload.(string)
 		// Delete entries first, then the index, within a single transaction.
 		// This avoids relying on per-connection foreign key pragma settings.
-		tx, err := s.db.Begin()
-		if err != nil {
-			return err
-		}
-		defer tx.Rollback()
-		if _, err := tx.Exec(`DELETE FROM wiki_entries WHERE index_id = ?`, id); err != nil {
-			return err
-		}
-		if _, err := tx.Exec(`DELETE FROM wiki_indexes WHERE id = ?`, id); err != nil {
-			return err
-		}
-		return tx.Commit()
+		// The transaction is retried as a whole while the database is locked: a
+		// failed attempt rolls back, so a retry cannot leave a half-deleted
+		// index behind.
+		return withBusyRetry(func() error {
+			tx, err := s.db.Begin()
+			if err != nil {
+				return err
+			}
+			defer tx.Rollback()
+			if _, err := tx.Exec(`DELETE FROM wiki_entries WHERE index_id = ?`, id); err != nil {
+				return err
+			}
+			if _, err := tx.Exec(`DELETE FROM wiki_indexes WHERE id = ?`, id); err != nil {
+				return err
+			}
+			return tx.Commit()
+		})
 
 	case opCreateWikiEntry:
 		entry := op.payload.(*WikiEntry)
@@ -333,7 +369,7 @@ func (s *SQLiteStorage) CreateDocument(doc *Document) error {
 	doc.CreatedAt = now
 	doc.UpdatedAt = now
 
-	return s.sendWriteOp(writeOp{opType: opCreateDocument, payload: doc})
+	return s.sendWriteOp(opCreateDocument, doc)
 }
 
 // UpdateDocumentStatus updates document status.
@@ -344,7 +380,7 @@ func (s *SQLiteStorage) UpdateDocumentStatus(id, status, errMsg string) error {
 		errMsg  string
 		updated time.Time
 	}{id: id, status: status, errMsg: errMsg, updated: time.Now().UTC()}
-	return s.sendWriteOp(writeOp{opType: opUpdateDocumentStatus, payload: payload})
+	return s.sendWriteOp(opUpdateDocumentStatus, payload)
 }
 
 // GetDocument retrieves a document by ID
@@ -503,9 +539,134 @@ func (s *SQLiteStorage) CountDocuments(query DocumentQuery) (int, error) {
 	return count, nil
 }
 
-// DeleteDocument deletes a document and its chunks.
-func (s *SQLiteStorage) DeleteDocument(id string) error {
-	return s.sendWriteOp(writeOp{opType: opDeleteDocument, payload: id})
+// DeleteDocument deletes a document and all of its chunks in one transaction,
+// returning the number of chunks that were removed.
+func (s *SQLiteStorage) DeleteDocument(id string) (int64, error) {
+	return s.sendWriteOpCount(opDeleteDocument, id)
+}
+
+// deleteDocumentCascade removes a document and all of its chunks in a single
+// transaction and returns the number of chunks removed.
+//
+// The chunks table declares ON DELETE CASCADE, but SQLite only honours that on
+// connections with PRAGMA foreign_keys enabled, so the chunks are deleted
+// explicitly first — this also sweeps up rows that predate working foreign
+// keys. Any failure rolls the whole transaction back, so a delete either
+// removes the document together with every chunk, or leaves both untouched.
+func (s *SQLiteStorage) deleteDocumentCascade(id string) (int64, error) {
+	var chunksDeleted int64
+
+	err := withBusyRetry(func() error {
+		tx, err := s.db.Begin()
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback()
+
+		res, err := tx.Exec(`DELETE FROM chunks WHERE document_id = ?`, id)
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+
+		if _, err := tx.Exec(`DELETE FROM documents WHERE id = ?`, id); err != nil {
+			return err
+		}
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+		chunksDeleted = n
+		return nil
+	})
+
+	return chunksDeleted, err
+}
+
+// CountOrphanChunks returns the number of chunks whose document no longer
+// exists. Such rows are left behind by deletes issued before cascade deletes
+// were reliable and can otherwise surface as ghost search results.
+func (s *SQLiteStorage) CountOrphanChunks() (int, error) {
+	var count int
+	err := s.db.QueryRow(`
+		SELECT COUNT(*) FROM chunks
+		WHERE document_id NOT IN (SELECT id FROM documents)`).Scan(&count)
+	return count, err
+}
+
+// DeleteOrphanChunks removes chunks whose document no longer exists and
+// returns how many were removed. Like every mutation it goes through the
+// single write worker, so it cannot collide with a queued write for the
+// database lock; the single DELETE statement is atomic on its own.
+func (s *SQLiteStorage) DeleteOrphanChunks() (int64, error) {
+	return s.sendWriteOpCount(opDeleteOrphanChunks, nil)
+}
+
+// deleteOrphanChunks runs the orphan-chunk delete. Only the write worker calls
+// it. The single statement is atomic, so the busy-retry can safely re-run it in
+// full — that retry still matters here because the write queue only serialises
+// writes within this process, not against other go-rag processes.
+func (s *SQLiteStorage) deleteOrphanChunks() (int64, error) {
+	var deleted int64
+
+	err := withBusyRetry(func() error {
+		res, err := s.db.Exec(`DELETE FROM chunks WHERE document_id NOT IN (SELECT id FROM documents)`)
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		deleted = n
+		return nil
+	})
+
+	return deleted, err
+}
+
+// isBusyError reports whether err is a transient SQLite lock error
+// (SQLITE_BUSY or SQLITE_LOCKED) that retrying the statement can resolve.
+func isBusyError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	var sqliteErr *sqlite.Error
+	if errors.As(err, &sqliteErr) {
+		switch sqliteErr.Code() {
+		case sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED:
+			return true
+		}
+		return false
+	}
+
+	// Non-typed driver errors carry the code in their message
+	// ("database is locked (5) (SQLITE_BUSY)").
+	msg := err.Error()
+	return strings.Contains(msg, "SQLITE_BUSY") ||
+		strings.Contains(msg, "SQLITE_LOCKED") ||
+		strings.Contains(msg, "database is locked")
+}
+
+// withBusyRetry runs fn, retrying while it reports a transient SQLite lock
+// error. fn must be safe to re-run from scratch, since it is re-executed in
+// full after each failed attempt (any earlier partial work is rolled back by
+// the caller's transaction).
+func withBusyRetry(fn func() error) error {
+	var err error
+	for attempt := 0; attempt <= busyRetryAttempts; attempt++ {
+		if attempt > 0 {
+			time.Sleep(busyRetryDelay * time.Duration(attempt))
+		}
+		err = fn()
+		if !isBusyError(err) {
+			return err
+		}
+	}
+	return fmt.Errorf("database stayed locked after %d attempts: %w", busyRetryAttempts+1, err)
 }
 
 // CreateChunk creates a single chunk (for async processing).
@@ -516,7 +677,7 @@ func (s *SQLiteStorage) CreateChunk(chunk *Chunk) error {
 	if chunk.CreatedAt.IsZero() {
 		chunk.CreatedAt = time.Now().UTC()
 	}
-	return s.sendWriteOp(writeOp{opType: opCreateChunk, payload: chunk})
+	return s.sendWriteOp(opCreateChunk, chunk)
 }
 
 // CreateChunks creates multiple chunks in a transaction.
@@ -524,14 +685,22 @@ func (s *SQLiteStorage) CreateChunks(chunks []Chunk) error {
 	if len(chunks) == 0 {
 		return nil
 	}
-	return s.sendWriteOp(writeOp{opType: opCreateChunks, payload: chunks})
+	return s.sendWriteOp(opCreateChunks, chunks)
 }
+
+// chunkSelect is the column list shared by the chunk queries that feed
+// retrieval. All of them join documents (see chunkFrom).
+const chunkSelect = `SELECT c.id, c.document_id, c.text, c.chunk_index, c.embedding, c.created_at`
+
+// chunkFrom joins chunks to documents so chunks whose document has been
+// deleted are never returned. Retrieval feeds these rows straight to users, so
+// an orphaned chunk would otherwise surface as a ghost search result.
+const chunkFrom = `FROM chunks c JOIN documents d ON d.id = c.document_id`
 
 // GetChunkByIndex retrieves a single chunk by document ID and chunk index.
 func (s *SQLiteStorage) GetChunkByIndex(docID string, index int) (*Chunk, error) {
-	row := s.db.QueryRow(`
-		SELECT id, document_id, text, chunk_index, embedding, created_at
-		FROM chunks WHERE document_id = ? AND chunk_index = ?`, docID, index)
+	row := s.db.QueryRow(chunkSelect+`
+		`+chunkFrom+` WHERE c.document_id = ? AND c.chunk_index = ?`, docID, index)
 
 	var chunk Chunk
 	var emb []byte
@@ -550,9 +719,8 @@ func (s *SQLiteStorage) GetChunkByIndex(docID string, index int) (*Chunk, error)
 
 // GetChunksByDocument retrieves all chunks for a document
 func (s *SQLiteStorage) GetChunksByDocument(docID string) ([]Chunk, error) {
-	rows, err := s.db.Query(`
-		SELECT id, document_id, text, chunk_index, embedding, created_at
-		FROM chunks WHERE document_id = ? ORDER BY chunk_index`, docID)
+	rows, err := s.db.Query(chunkSelect+`
+		`+chunkFrom+` WHERE c.document_id = ? ORDER BY c.chunk_index`, docID)
 	if err != nil {
 		return nil, err
 	}
@@ -576,9 +744,8 @@ func (s *SQLiteStorage) GetChunksByDocument(docID string) ([]Chunk, error) {
 
 // GetAllChunks retrieves all chunks with embeddings
 func (s *SQLiteStorage) GetAllChunks() ([]Chunk, error) {
-	rows, err := s.db.Query(`
-		SELECT id, document_id, text, chunk_index, embedding, created_at
-		FROM chunks WHERE embedding IS NOT NULL`)
+	rows, err := s.db.Query(chunkSelect + `
+		` + chunkFrom + ` WHERE c.embedding IS NOT NULL`)
 	if err != nil {
 		return nil, err
 	}
@@ -604,10 +771,9 @@ func (s *SQLiteStorage) GetAllChunks() ([]Chunk, error) {
 func (s *SQLiteStorage) SearchByKeyword(query string, limit int) ([]Chunk, error) {
 	// Simple LIKE-based search
 	likeQuery := "%" + query + "%"
-	
-	rows, err := s.db.Query(`
-		SELECT id, document_id, text, chunk_index, embedding, created_at
-		FROM chunks WHERE text LIKE ? LIMIT ?`, likeQuery, limit)
+
+	rows, err := s.db.Query(chunkSelect+`
+		`+chunkFrom+` WHERE c.text LIKE ? LIMIT ?`, likeQuery, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -639,7 +805,7 @@ func (s *SQLiteStorage) CreateWikiIndex(idx *WikiIndex) error {
 	now := time.Now().UTC()
 	idx.CreatedAt = now
 	idx.UpdatedAt = now
-	return s.sendWriteOp(writeOp{opType: opCreateWikiIndex, payload: idx})
+	return s.sendWriteOp(opCreateWikiIndex, idx)
 }
 
 // GetWikiIndex retrieves a wiki index by ID.
@@ -679,7 +845,7 @@ func (s *SQLiteStorage) ListWikiIndexes() ([]WikiIndex, error) {
 
 // DeleteWikiIndex deletes a wiki index and all its entries.
 func (s *SQLiteStorage) DeleteWikiIndex(id string) error {
-	return s.sendWriteOp(writeOp{opType: opDeleteWikiIndex, payload: id})
+	return s.sendWriteOp(opDeleteWikiIndex, id)
 }
 
 // ---- Wiki entry methods --------------------------------------------------
@@ -692,7 +858,7 @@ func (s *SQLiteStorage) CreateWikiEntry(entry *WikiEntry) error {
 	now := time.Now().UTC()
 	entry.CreatedAt = now
 	entry.UpdatedAt = now
-	return s.sendWriteOp(writeOp{opType: opCreateWikiEntry, payload: entry})
+	return s.sendWriteOp(opCreateWikiEntry, entry)
 }
 
 // GetWikiEntry retrieves a wiki entry by ID.
@@ -736,12 +902,12 @@ func (s *SQLiteStorage) UpdateWikiEntry(entry *WikiEntry) error {
 		return fmt.Errorf("entry id is required")
 	}
 	entry.UpdatedAt = time.Now().UTC()
-	return s.sendWriteOp(writeOp{opType: opUpdateWikiEntry, payload: entry})
+	return s.sendWriteOp(opUpdateWikiEntry, entry)
 }
 
 // DeleteWikiEntry deletes a wiki entry.
 func (s *SQLiteStorage) DeleteWikiEntry(id string) error {
-	return s.sendWriteOp(writeOp{opType: opDeleteWikiEntry, payload: id})
+	return s.sendWriteOp(opDeleteWikiEntry, id)
 }
 
 // Helper functions
