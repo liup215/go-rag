@@ -2,6 +2,31 @@
 
 ## Current work focus
 
+Keyword-only ingestion (BM25-only mode): `go-rag add` no longer exits 1 when
+`cfg.Embedding.APIKey` is empty. Parse + chunk run as usual, the embedding
+worker pipeline is skipped, and `indexKeywordOnly(store, docID, chunks)` writes
+the chunks via the existing `store.CreateChunks` (empty `Embedding` → SQL NULL)
+then marks the document `indexed`. Stdout prints the prominent notice
+"⚠ 未配置 embedding API key，已按关键词-only 模式索引（BM25），向量搜索不可用"
+plus a `--force`-rebuild hint. `search` needed no structural change (`retriever.Search`
+already goes BM25-only when the embedder is nil); it now prints an
+"ℹ 当前为关键词-only（BM25）检索" notice on **stderr** so `--json` stays clean.
+`handleAdd` also gained `defer store.Close()` like the other handlers.
+
+Tests (`cmd/go-rag/main_test.go`): `TestIndexKeywordOnly` (NULL-embedding chunks,
+`indexed` status, `GetAllChunks` empty / `SearchByKeyword` hits),
+`TestIndexKeywordOnlyFailure` (FK-failing batch leaves status `indexing`),
+`TestAddWithoutEmbeddingKeyIndexesKeywordOnly` (subprocess e2e: exit 0, stdout
+notice, NULL-embedding chunks, `indexed`, duplicate guard still skips, still one
+document), `TestSearchKeywordOnlyNotice` (stderr notice + BM25 JSON hits). A new
+`TestMain` lets the test binary re-run itself as the CLI (`GO_RAG_TEST_RUN_MAIN=1`),
+so the `os.Exit`-heavy handlers are tested without building a separate binary.
+Verified end to end with the built binary: no-key add → indexed + notice; repeat
+add → duplicate skip; search → BM25 hit + stderr notice; with a key and a dead
+endpoint the original worker path still runs and cleans up.
+
+## Previous round (delete status fix + storage hardening)
+
 Orphan-chunk fix: `delete` now removes a document and all of its chunks in one
 transaction, every retrieval query joins `documents` so orphaned chunks can
 never surface as ghost results, and a new `go-rag gc` command cleans up
@@ -13,6 +38,12 @@ that exists without chunks (e.g. left behind by an interrupted add) succeeds
 with `(0 chunk(s) removed)` instead of a false "not found".
 
 ## Recent changes
+- Keyword-only round: `handleAdd`'s empty-key `os.Exit(1)` became a
+  `keywordOnly` flag; the degrade branch sits right after the chunks are
+  prepared and returns early, so the embedding worker code is untouched.
+  `indexKeywordOnly` is the only new helper; search only gained the stderr
+  notice. `handleAdd` now releases storage with `defer store.Close()` (matching
+  `handleDelete`/`handleGC`).
 - `handleDelete` used to treat `chunksDeleted == 0` as proof the document was
   missing — but the check ran after the delete, by which time the document was
   gone either way. Reproduced end to end: a 0-chunk document disappeared from
@@ -93,7 +124,10 @@ with `(0 chunk(s) removed)` instead of a false "not found".
 ## Next steps
 - Candidate follow-up (from known issues): `SQLiteStorage.SearchByKeyword`
   LIKE-pre-filters on the raw query, so multi-word Chinese queries can return
-  an empty candidate set; tokenise into AND/OR LIKE clauses.
+  an empty candidate set; tokenise into AND/OR LIKE clauses. This matters more
+  now that keyword-only mode is the default experience without an API key.
+- Consider a `go-rag list --filter mode=keyword-only` (or a status suffix) so
+  users can find documents that still need re-embedding after configuring a key.
 - Consider upstreaming/reporting the gopdf lexer stall (empty keyword, no
   position advance) — go-rag now guards around it locally.
 - Consider `--json` for `get-chunk` and `wiki` subcommands if scripting demand
@@ -104,6 +138,27 @@ with `(0 chunk(s) removed)` instead of a false "not found".
   passes plain `go test` and `-race` is green for every other package.
 
 ## Active decisions
+- Keyword-only ingestion is a **degrade**, not an error: an empty embedding key
+  must not block ingest, because BM25 retrieval alone is already useful. The
+  document is marked `indexed` (true — keyword search finds it) and the
+  limitation is communicated by the stdout warning, not by a fake status.
+- Chunk storage reuses the existing `CreateChunks` path; NULL embeddings are
+  already the storage layer's representation of "not embedded" and
+  `GetAllChunks`'s `embedding IS NOT NULL` filter keeps them out of vector
+  search, so no storage change was needed.
+- The keyword-only notice goes to **stdout** (an indexing outcome, visible in
+  normal terminal use), while the search-side notice goes to **stderr** (so
+  `search --json` output stays machine-readable).
+- Duplicate-guard / `--force` semantics are unchanged and apply in keyword-only
+  mode too — the mode choice happens after the guard, so an already-indexed
+  path is never silently re-written (and never half-indexed) because of a
+  missing key.
+- `indexKeywordOnly` is a testable helper (store in, error out) following the
+  `deleteDocumentChecked` precedent: exit semantics stay in the handler,
+  behaviour is pinned in tests. The e2e test drives the real `os.Exit`-heavy
+  handler by re-running the test binary as the CLI (`GO_RAG_TEST_RUN_MAIN=1` in
+  `TestMain`) rather than building a separate binary — no build step, no
+  sandbox issues, and subprocesses keep stdout/stderr/exit codes inspectable.
 - Every mutation goes through the single write worker — `DeleteOrphanChunks`
   included. The queue cannot serialise against *other processes*, which is why
   worker-side multi-statement writes keep their `withBusyRetry` wrapper; single-
