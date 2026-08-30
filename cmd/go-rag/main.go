@@ -207,12 +207,13 @@ func handleAdd() {
 		os.Exit(1)
 	}
 
-	// Check embedding config
-	if cfg.Embedding.APIKey == "" {
-		fmt.Fprintf(os.Stderr, "Error: embedding API key not configured\n")
-		fmt.Fprintf(os.Stderr, "Run: go-rag config set embedding.api-key <your-key>\n")
-		os.Exit(1)
-	}
+	// The embedding API key is optional: without one the document is still
+	// parsed, chunked and stored, but the chunks carry no embedding (stored as
+	// SQL NULL) and the document is marked indexed anyway. Retrieval stays
+	// usable because `go-rag search` drops the embedder when no key is set and
+	// falls back to BM25-only keyword search; vector search only becomes
+	// available again once a key is configured and the document is re-indexed.
+	keywordOnly := cfg.Embedding.APIKey == ""
 
 	// Initialize storage
 	store, err := storage.NewStorage(cfg.Storage.Path)
@@ -220,6 +221,7 @@ func handleAdd() {
 		fmt.Fprintf(os.Stderr, "Error initializing storage: %v\n", err)
 		os.Exit(1)
 	}
+	defer store.Close()
 
 	// Duplicate detection: a document already indexed from this path is either
 	// reported (skip) or deleted (--force), never silently duplicated.
@@ -302,10 +304,32 @@ func handleAdd() {
 		})
 	}
 
+	startTime := time.Now()
+
+	// Degraded path: no embedding API key, so there is nothing to embed and the
+	// worker pipeline is skipped entirely. Chunks go straight to storage with a
+	// NULL embedding — GetAllChunks excludes NULL-embedding chunks, so they
+	// never reach vector search — and the document is still marked indexed,
+	// which is the truth: BM25 keyword search does find it.
+	if keywordOnly {
+		if err := indexKeywordOnly(store, doc.ID, storageChunks); err != nil {
+			fmt.Fprintf(os.Stderr, "Error indexing keyword-only: %v\n", err)
+			if _, delErr := store.DeleteDocument(doc.ID); delErr != nil {
+				fmt.Fprintf(os.Stderr, "Error cleaning up document after failure: %v\n", delErr)
+			}
+			fmt.Println("\n⚠ Indexing failed: chunks could not be stored. Document and chunks have been removed.")
+			os.Exit(1)
+		}
+
+		fmt.Printf("\n⚠ 未配置 embedding API key，已按关键词-only 模式索引（BM25），向量搜索不可用。\n")
+		fmt.Printf("  配置后可用 --force 重建以启用向量搜索：go-rag config set embedding.api-key <your-key>\n")
+		fmt.Printf("\n✅ Successfully indexed %d chunks (keyword-only, ID: %s)\n", len(storageChunks), doc.ID)
+		return
+	}
+
 	// Async parallel embedding with progress
 	fmt.Printf("\n🚀 Processing %d chunks with %d concurrent workers...\n\n", len(storageChunks), *workers)
 
-	startTime := time.Now()
 	totalChunks := len(storageChunks)
 	completedChunks := int32(0)
 	failedBatches := int32(0)
@@ -458,6 +482,24 @@ func handleAdd() {
 	}
 }
 
+// indexKeywordOnly is the degraded ingest path used when no embedding API key
+// is configured: chunks are written exactly as they are — with no embedding,
+// which the storage layer keeps as SQL NULL — and the document is marked
+// indexed. GetAllChunks filters NULL embeddings out, so these chunks never
+// reach vector search, while keyword (BM25) search still recalls them.
+//
+// The whole batch is one storage transaction, so a failure here leaves no
+// partial chunks behind; the caller removes the document record.
+func indexKeywordOnly(store storage.Storage, docID string, chunks []storage.Chunk) error {
+	if err := store.CreateChunks(chunks); err != nil {
+		return fmt.Errorf("storing chunks: %w", err)
+	}
+	if err := store.UpdateDocumentStatus(docID, "indexed", ""); err != nil {
+		return fmt.Errorf("updating document status: %w", err)
+	}
+	return nil
+}
+
 // documentsAtPath returns every document already stored at filePath, newest
 // first. It powers duplicate detection in handleAdd: the "path" filter is an
 // exact SQL match, so similar-looking paths are not treated as duplicates.
@@ -564,6 +606,10 @@ func handleSearch() {
 	var emb embedder.Embedder
 	if cfg.Embedding.APIKey != "" {
 		emb = embedder.NewOpenAIEmbedder(cfg.Embedding.APIKey, cfg.Embedding.URL, cfg.Embedding.Model)
+	} else {
+		// The retriever runs BM25-only without an embedder. This notice goes to
+		// stderr so `--json` output on stdout stays machine-readable.
+		fmt.Fprintln(os.Stderr, "ℹ 未配置 embedding API key：当前为关键词-only（BM25）检索，向量搜索不可用。")
 	}
 
 	// Initialize retriever

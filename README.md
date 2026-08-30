@@ -82,6 +82,12 @@ the file:
 go-rag add document.pdf --force
 ```
 
+An embedding API key is optional: without one, `add` falls back to keyword-only
+indexing (BM25). Documents are parsed and chunked as usual, the chunks are
+stored without embeddings, and the document is marked `indexed` — but vector
+search is unavailable for them. Configure a key and re-add with `--force` to
+enable vector search.
+
 ### 4. Search
 
 Each result shows the document it came from (ID, name, and file path) plus the

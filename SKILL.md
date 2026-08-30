@@ -116,6 +116,12 @@ existing document ID and exits 0. Pass `--force` to delete the existing
 document (chunks included) and index the file again — useful after editing a
 document.
 
+Without an embedding API key, `add` still works — it falls back to keyword-only
+indexing (BM25): documents are parsed and chunked as usual, the chunks are
+stored without embeddings, and the document is marked `indexed`. Vector search
+is unavailable in that mode; `search` warns about it on stderr and ranks with
+BM25 only. Configure a key and re-add with `--force` to get embeddings.
+
 ### Search
 
 Each hit reports the document it came from — ID, name, and file path — plus the
@@ -321,14 +327,24 @@ go-rag add api-docs.xml
 
 ## Troubleshooting
 
-### "embedding API key not configured"
+### "未配置 embedding API key，已按关键词-only 模式索引"
 
-Run:
+`add` works without an embedding API key: the document is parsed, chunked and
+stored as usual, but the chunks carry no embedding, so only BM25 keyword search
+covers them. To enable vector search:
+
 ```bash
 go-rag config set embedding.api-key your-api-key
+go-rag add <file> --force   # re-index so the chunks get embeddings
 ```
 
+Documents indexed while no key was configured keep `status: indexed`; `search`
+warns "当前为关键词-only（BM25）检索" on stderr until a key is set.
+
 ### "no text content extracted from file"
+
+- For PDFs: Ensure it's a text-based PDF, not scanned images
+- For Office files: Make sure they're .docx/.xlsx/.pptx (not older .doc/.xls/.ppt)
 
 - For PDFs: Ensure it's a text-based PDF, not scanned images
 - For Office files: Make sure they're .docx/.xlsx/.pptx (not older .doc/.xls/.ppt)

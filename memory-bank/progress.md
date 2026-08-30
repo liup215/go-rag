@@ -3,6 +3,7 @@
 ## What works
 - Configuration initialization and management.
 - Document ingestion with chunking and embedding batching.
+- Keyword-only (BM25-only) ingestion: `add` no longer aborts when no embedding API key is configured. Parse + chunk run as usual, chunks are written with no embedding (SQL NULL) straight through `CreateChunks`, the document is marked `indexed`, and stdout announces the mode ("⚠ 未配置 embedding API key，已按关键词-only 模式索引（BM25），向量搜索不可用"). The duplicate-path guard and `--force` apply unchanged in this mode; `search` (which drops the embedder without a key) warns on stderr and retrieves those chunks with BM25.
 - Duplicate ingestion guard: `add` looks up the exact file path first; an already-indexed path prints the existing doc ID and exits 0, `--force` deletes the existing record(s) (chunks included) and re-indexes. `filepath.Clean` makes `./x` and `x` dedupe to one record.
 - Hybrid semantic + BM25 search with optional reranking and query rewriting.
 - Chinese/CJK keyword recall: BM25 tokenisation splits contiguous CJK runs into overlapping bigrams (+unigrams) and treats CJK punctuation as token separators, so Chinese queries match chunks containing those substrings.
@@ -34,12 +35,13 @@
 - Orphan-chunk fix (cascade delete + retrieval JOINs + `gc`) implemented; all tests pass, `go vet` clean, binary builds, and CLI behaviour was smoke-tested end to end against a seeded SQLite DB.
 
 ## Known issues
-- Document ingestion requires a configured embedding API key; local no-embedding mode is not supported.
+- Documents indexed in keyword-only mode (no embedding key) are invisible to vector search — re-index with `--force` after configuring `embedding.api-key` to give them embeddings.
 - `SQLiteStorage.SearchByKeyword` pre-filters with a single `LIKE '%<raw query>%'`, so multi-word Chinese queries ("机器学习 算法") return an empty candidate set before BM25 runs; the hybrid path (embedder configured) is unaffected because it loads all chunks.
 - Databases written before the foreign-key fix may still contain orphan chunks; `go-rag gc` cleans them (retrieval already hides them).
 - gopdf v0.9.5 lexer bug (worked around, not fixed upstream): `readKeyword` returns an empty keyword *without advancing* for the delimiters `NextToken` does not handle (`)`, `{`, `}`), so `ExtractPageText` spins forever on content it cannot tokenize (e.g. ciphertext of an encrypted stream). `readablePageContent` in `internal/parser/pdf.go` pre-scans each page with gopdf's own lexer and skips pages that hit it; worth reporting upstream.
 
 ## Recent fixes
+- `add` without an embedding API key used to exit 1 ("Error: embedding API key not configured"), making the tool unusable as a pure keyword index. It now degrades: parse/chunk unchanged, the embedding worker pipeline is skipped, chunks are written with a NULL embedding via `indexKeywordOnly` (status becomes `indexed`, stdout announces keyword-only mode), and a failed batch write still cleans the document up. `handleSearch` prints a keyword-only notice on stderr (stdout stays JSON-clean). Covered by `TestIndexKeywordOnly`, `TestIndexKeywordOnlyFailure`, `TestAddWithoutEmbeddingKeyIndexesKeywordOnly` (subprocess e2e: NULL embeddings + `indexed` status + duplicate guard) and `TestSearchKeywordOnlyNotice`; the test binary now re-runs itself as the CLI via `GO_RAG_TEST_RUN_MAIN` in `TestMain`.
 - PDFs whose content gopdf cannot decode no longer hang the parser (`readablePageContent` guard, empty-keyword detection) and are skipped per page; when gopdf fails on structure or garbage, pdfcpu gets a second opinion before "no text extracted" is reported.
 
 - Databases written before the foreign-key fix may still contain orphan chunks; `go-rag gc` cleans them (retrieval already hides them).

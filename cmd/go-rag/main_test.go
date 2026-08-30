@@ -1,10 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -12,6 +15,7 @@ import (
 
 	"github.com/liup215/go-rag/internal/parser"
 	"github.com/liup215/go-rag/internal/storage"
+	"github.com/liup215/go-rag/pkg/config"
 )
 
 // docLookupStub satisfies storage.Storage by embedding the interface and
@@ -649,5 +653,297 @@ func TestParseFailureHints(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// ---- keyword-only (BM25-only) add path ------------------------------------
+
+// TestMain lets this test binary double as the go-rag CLI: a subprocess test
+// execs os.Args[0] with GO_RAG_TEST_RUN_MAIN=1, which jumps straight into
+// main(), so the os.Exit-heavy handlers can be exercised end to end without
+// building a separate binary.
+func TestMain(m *testing.M) {
+	if os.Getenv("GO_RAG_TEST_RUN_MAIN") == "1" {
+		main()
+		return
+	}
+	os.Exit(m.Run())
+}
+
+// newKeywordOnlyTestEnv points HOME/USERPROFILE at an isolated directory and
+// writes a config.yaml there with an empty embedding API key and a throwaway
+// storage path, so CLI subprocesses see exactly the "no embedding key" setup.
+// It returns the storage path the CLI was pointed at.
+func newKeywordOnlyTestEnv(t *testing.T) string {
+	t.Helper()
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+
+	dbPath := filepath.Join(t.TempDir(), "db.sqlite")
+	cfgDir := config.ConfigDir()
+	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
+		t.Fatalf("create config dir: %v", err)
+	}
+	cfgYAML := "embedding:\n" +
+		"  url: https://api.openai.com/v1\n" +
+		"  api_key: \"\"\n" +
+		"  model: text-embedding-3-small\n" +
+		"storage:\n" +
+		"  path: " + filepath.ToSlash(dbPath) + "\n"
+	if err := os.WriteFile(filepath.Join(cfgDir, "config.yaml"), []byte(cfgYAML), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	return dbPath
+}
+
+// runCLI runs this test binary as the go-rag CLI (see TestMain) and returns the
+// exit code plus both output streams. HOME/USERPROFILE still point at the test's
+// isolated home directory, so config and storage stay out of the real user's.
+func runCLI(t *testing.T, args ...string) (exitCode int, stdout, stderr string) {
+	t.Helper()
+
+	cmd := exec.Command(os.Args[0], args...)
+	cmd.Env = append(os.Environ(), "GO_RAG_TEST_RUN_MAIN=1")
+
+	var out, errOut bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &errOut
+
+	err := cmd.Run()
+	if exitErr, ok := err.(*exec.ExitError); ok {
+		return exitErr.ExitCode(), out.String(), errOut.String()
+	}
+	if err != nil {
+		t.Fatalf("running go-rag %v: %v\nstdout:\n%s\nstderr:\n%s", args, err, out.String(), errOut.String())
+	}
+	return 0, out.String(), errOut.String()
+}
+
+// sampleKeywordOnlyDoc writes a multi-paragraph text file whose paragraphs are
+// long enough that --chunk-size 24 (≈96 characters) yields one chunk each.
+func sampleKeywordOnlyDoc(t *testing.T) string {
+	t.Helper()
+
+	paragraphs := make([]string, 0, 8)
+	for i := 0; i < 8; i++ {
+		paragraphs = append(paragraphs, fmt.Sprintf(
+			"Photosynthesis in leaf %d converts light energy into chemical energy stored as sugar. "+
+				"Chloroplasts absorb photons and drive the Calvin cycle forward.", i))
+	}
+
+	path := filepath.Join(t.TempDir(), "photosynthesis.txt")
+	if err := os.WriteFile(path, []byte(strings.Join(paragraphs, "\n\n")), 0o644); err != nil {
+		t.Fatalf("write sample document: %v", err)
+	}
+	return path
+}
+
+// TestIndexKeywordOnly pins what the degraded add path stores: chunks keep no
+// embedding (SQL NULL), the document is marked indexed, the chunks stay
+// invisible to vector search and reachable through keyword search.
+func TestIndexKeywordOnly(t *testing.T) {
+	s := newDedupTestStorage(t)
+
+	doc := &storage.Document{Name: "notes.txt", FilePath: "docs/notes.txt", DocType: ".txt", Status: "indexing"}
+	if err := s.CreateDocument(doc); err != nil {
+		t.Fatalf("create document: %v", err)
+	}
+
+	chunks := []storage.Chunk{
+		{DocumentID: doc.ID, Text: "photosynthesis stores light energy as sugar", Index: 0},
+		{DocumentID: doc.ID, Text: "respiration releases stored energy again", Index: 1},
+	}
+	if err := indexKeywordOnly(s, doc.ID, chunks); err != nil {
+		t.Fatalf("indexKeywordOnly: %v", err)
+	}
+
+	got, err := s.GetDocument(doc.ID)
+	if err != nil {
+		t.Fatalf("get document: %v", err)
+	}
+	if got == nil || got.Status != "indexed" {
+		t.Fatalf("document status = %+v, want indexed", got)
+	}
+
+	stored, err := s.GetChunksByDocument(doc.ID)
+	if err != nil {
+		t.Fatalf("load chunks: %v", err)
+	}
+	if len(stored) != len(chunks) {
+		t.Fatalf("stored %d chunks, want %d", len(stored), len(chunks))
+	}
+	for _, chunk := range stored {
+		if len(chunk.Embedding) != 0 {
+			t.Errorf("chunk %d has %d embedding floats, want none", chunk.Index, len(chunk.Embedding))
+		}
+	}
+
+	// NULL-embedding chunks are excluded from vector search…
+	all, err := s.GetAllChunks()
+	if err != nil {
+		t.Fatalf("GetAllChunks: %v", err)
+	}
+	if len(all) != 0 {
+		t.Errorf("GetAllChunks returned %d chunk(s), want 0 for NULL-embedding chunks", len(all))
+	}
+
+	// …but stay reachable through the keyword path.
+	hits, err := s.SearchByKeyword("energy", 10)
+	if err != nil {
+		t.Fatalf("SearchByKeyword: %v", err)
+	}
+	if len(hits) != len(chunks) {
+		t.Errorf("SearchByKeyword found %d chunk(s), want %d", len(hits), len(chunks))
+	}
+}
+
+// TestIndexKeywordOnlyFailure leaves the document untouched when the chunk
+// write fails, so the status update never reports success for a half-written
+// document and handleAdd's cleanup is what surfaces the failure.
+func TestIndexKeywordOnlyFailure(t *testing.T) {
+	s := newDedupTestStorage(t)
+
+	doc := &storage.Document{Name: "notes.txt", FilePath: "docs/notes.txt", DocType: ".txt", Status: "indexing"}
+	if err := s.CreateDocument(doc); err != nil {
+		t.Fatalf("create document: %v", err)
+	}
+
+	// Chunks referencing a document that does not exist violate the foreign
+	// key, so the whole batch fails and the status must stay "indexing".
+	chunks := []storage.Chunk{{DocumentID: "no-such-doc", Text: "orphan", Index: 0}}
+	if err := indexKeywordOnly(s, doc.ID, chunks); err == nil {
+		t.Fatal("expected an error when the target document does not exist")
+	}
+
+	got, err := s.GetDocument(doc.ID)
+	if err != nil {
+		t.Fatalf("get document: %v", err)
+	}
+	if got == nil || got.Status != "indexing" {
+		t.Fatalf("failed keyword-only indexing changed the status: %+v", got)
+	}
+}
+
+// TestAddWithoutEmbeddingKeyIndexesKeywordOnly covers the degraded add path end
+// to end: with no embedding API key configured, `go-rag add` must still index
+// the document (chunks written without an embedding, status indexed), announce
+// the keyword-only mode on stdout, and keep skipping a path that is already
+// indexed. Vector search must not see those chunks; keyword search must.
+func TestAddWithoutEmbeddingKeyIndexesKeywordOnly(t *testing.T) {
+	dbPath := newKeywordOnlyTestEnv(t)
+	docFile := sampleKeywordOnlyDoc(t)
+
+	addArgs := []string{"add", docFile, "--chunk-size", "24", "--overlap", "0"}
+
+	code, stdout, stderr := runCLI(t, addArgs...)
+	if code != 0 {
+		t.Fatalf("add exit code = %d, want 0\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+	if !strings.Contains(stdout, "关键词-only") {
+		t.Errorf("add output does not announce keyword-only mode:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "Successfully indexed") {
+		t.Errorf("add output does not report success:\n%s", stdout)
+	}
+
+	store, err := storage.NewStorage(dbPath)
+	if err != nil {
+		t.Fatalf("open storage: %v", err)
+	}
+	defer store.Close()
+
+	docs, err := store.ListDocuments(storage.DocumentQuery{
+		Filters: map[string][]string{"path": {docFile}},
+	})
+	if err != nil {
+		t.Fatalf("list documents: %v", err)
+	}
+	if len(docs) != 1 {
+		t.Fatalf("expected exactly 1 document for the path, got %d", len(docs))
+	}
+	if docs[0].Status != "indexed" {
+		t.Errorf("document status = %q, want indexed", docs[0].Status)
+	}
+
+	chunks, err := store.GetChunksByDocument(docs[0].ID)
+	if err != nil {
+		t.Fatalf("load chunks: %v", err)
+	}
+	if len(chunks) == 0 {
+		t.Fatal("expected the document to have chunks")
+	}
+	for _, chunk := range chunks {
+		if len(chunk.Embedding) != 0 {
+			t.Errorf("chunk %d carries an embedding; keyword-only indexing must store none", chunk.Index)
+		}
+	}
+
+	// Chunks are stored with a NULL embedding: the vector-search loader never
+	// returns them, while the keyword (BM25) path still finds them.
+	all, err := store.GetAllChunks()
+	if err != nil {
+		t.Fatalf("GetAllChunks: %v", err)
+	}
+	if len(all) != 0 {
+		t.Errorf("GetAllChunks returned %d chunk(s), want 0 — NULL-embedding chunks must stay invisible to vector search", len(all))
+	}
+	hits, err := store.SearchByKeyword("photosynthesis", 10)
+	if err != nil {
+		t.Fatalf("SearchByKeyword: %v", err)
+	}
+	if len(hits) == 0 {
+		t.Error("SearchByKeyword found nothing; keyword-only indexed chunks must stay retrievable")
+	}
+
+	// Duplicate guard: adding the same path again must skip, not index twice.
+	code, stdout, _ = runCLI(t, addArgs...)
+	if code != 0 {
+		t.Fatalf("duplicate add exit code = %d, want 0\nstdout:\n%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "already exists for this path") {
+		t.Errorf("duplicate add was not skipped:\n%s", stdout)
+	}
+	docs, err = store.ListDocuments(storage.DocumentQuery{
+		Filters: map[string][]string{"path": {docFile}},
+	})
+	if err != nil {
+		t.Fatalf("list documents after duplicate add: %v", err)
+	}
+	if len(docs) != 1 {
+		t.Fatalf("documents at path after duplicate add = %d, want 1", len(docs))
+	}
+}
+
+// TestSearchKeywordOnlyNotice pins the search-side companion of the degraded add
+// path: without an API key the CLI warns about BM25-only retrieval on stderr
+// (keeping --json output on stdout machine-readable) and keyword search still
+// returns the chunk text.
+func TestSearchKeywordOnlyNotice(t *testing.T) {
+	newKeywordOnlyTestEnv(t)
+	docFile := sampleKeywordOnlyDoc(t)
+
+	if code, stdout, stderr := runCLI(t, "add", docFile, "--chunk-size", "24", "--overlap", "0"); code != 0 {
+		t.Fatalf("add exit code = %d, want 0\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+
+	code, stdout, stderr := runCLI(t, "search", "photosynthesis", "--json")
+	if code != 0 {
+		t.Fatalf("search exit code = %d, want 0\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+	if !strings.Contains(stderr, "关键词-only") {
+		t.Errorf("search should note keyword-only retrieval on stderr:\n%s", stderr)
+	}
+
+	var payload searchOutputJSON
+	if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
+		t.Fatalf("decode search JSON: %v\n%s", err, stdout)
+	}
+	if payload.Count == 0 || len(payload.Results) == 0 {
+		t.Fatalf("BM25-only search returned no results:\n%s", stdout)
+	}
+	if payload.Results[0].Text == "" || payload.Results[0].DocumentName != filepath.Base(docFile) {
+		t.Errorf("unexpected first result: %+v", payload.Results[0])
 	}
 }
