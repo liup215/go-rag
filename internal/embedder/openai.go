@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -21,6 +24,40 @@ type OpenAIEmbedder struct {
 	MaxBatch         int
 	InputTokenBudget int
 	HTTPClient       *http.Client
+
+	// MaxAttempts is how many times a batch is tried before giving up.
+	// Zero means DefaultMaxAttempts.
+	MaxAttempts int
+	// RetryBackoff is the exponential backoff base (1s, 2s, 4s, ... capped
+	// at MaxBackoff). Zero means DefaultRetryBackoff.
+	RetryBackoff time.Duration
+	// MaxBackoff caps the exponential backoff (the 429 Retry-After header,
+	// if present, may still wait longer). Zero means DefaultMaxBackoff.
+	MaxBackoff time.Duration
+}
+
+// Retry tuning defaults: a batch is retried for up to ~2 minutes of pure
+// backoff (1+2+4+8+16+30+30, plus any Retry-After waits), which is enough to
+// ride out typical API rate-limit windows instead of failing the whole add.
+const (
+	DefaultMaxAttempts  = 8
+	DefaultRetryBackoff = time.Second
+	DefaultMaxBackoff   = 30 * time.Second
+)
+
+// rateLimitError marks a 429 response, carrying the server-advised wait.
+type rateLimitError struct {
+	statusLine string
+	body       string
+	// retryAfter is the value of the Retry-After header (0 when absent).
+	retryAfter time.Duration
+}
+
+func (e *rateLimitError) Error() string {
+	if e.retryAfter > 0 {
+		return fmt.Sprintf("embeddings API 429 (retry after %s): %s%s", e.retryAfter, e.statusLine, e.body)
+	}
+	return fmt.Sprintf("embeddings API 429: %s%s", e.statusLine, e.body)
 }
 
 // NewOpenAIEmbedder creates an embedder for OpenAI-compatible APIs.
@@ -99,8 +136,19 @@ func (e *OpenAIEmbedder) nextBatchEnd(texts []string, start int) int {
 
 // embedBatchWithRetry attempts to embed a batch with retries.
 func (e *OpenAIEmbedder) embedBatchWithRetry(ctx context.Context, texts []string) ([][]float32, error) {
-	const maxAttempts = 3
-	backoff := time.Second
+	maxAttempts := e.MaxAttempts
+	if maxAttempts <= 0 {
+		maxAttempts = DefaultMaxAttempts
+	}
+	backoff := e.RetryBackoff
+	if backoff <= 0 {
+		backoff = DefaultRetryBackoff
+	}
+	maxBackoff := e.MaxBackoff
+	if maxBackoff <= 0 {
+		maxBackoff = DefaultMaxBackoff
+	}
+
 	var lastErr error
 
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
@@ -114,15 +162,39 @@ func (e *OpenAIEmbedder) embedBatchWithRetry(ctx context.Context, texts []string
 			return nil, err
 		}
 
+		// Wait server-advised seconds on 429, otherwise exponential backoff.
+		wait := backoff
+		var rlErr *rateLimitError
+		if errors.As(err, &rlErr) && rlErr.retryAfter > wait {
+			wait = rlErr.retryAfter
+		}
+		fmt.Fprintf(os.Stderr, "⚠ embedding API 限速 (%d/%d)，%s 后重试…\n",
+			attempt, maxAttempts, wait.Truncate(time.Millisecond))
+
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
-		case <-time.After(backoff):
+		case <-time.After(wait):
 		}
-		backoff *= 2
+		if wait < maxBackoff {
+			backoff *= 2
+			if backoff > maxBackoff {
+				backoff = maxBackoff
+			}
+		}
 	}
 
 	return nil, lastErr
+}
+
+// retryAfter parses an HTTP Retry-After seconds value ("120"); it returns 0
+// for anything it cannot parse. (Dates are tolerated by returning 0.)
+func retryAfter(v string) time.Duration {
+	n, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
+	if err != nil || n < 0 {
+		return 0
+	}
+	return time.Duration(n) * time.Second
 }
 
 // embedBatch sends a single batch to the API.
@@ -167,7 +239,11 @@ func (e *OpenAIEmbedder) embedBatch(ctx context.Context, texts []string) ([][]fl
 
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("embeddings API %d: %s", resp.StatusCode, string(b))
+		line := fmt.Sprintf("embeddings API %d: ", resp.StatusCode)
+		if resp.StatusCode == http.StatusTooManyRequests {
+			return nil, &rateLimitError{statusLine: line, body: string(b), retryAfter: retryAfter(resp.Header.Get("Retry-After"))}
+		}
+		return nil, fmt.Errorf("%s%s", line, string(b))
 	}
 
 	var result struct {
