@@ -25,7 +25,10 @@ type OpenAIEmbedder struct {
 	InputTokenBudget int
 	HTTPClient       *http.Client
 
-	// MaxAttempts is how many times a batch is tried before giving up.
+	// MaxAttempts limits retries for transient errors other than 429
+	// (timeouts, 5xx, broken connections). A 429 rate limit is always
+	// retried indefinitely — waiting is guaranteed to succeed eventually,
+	// so giving up on it would only fail a doomed-to-succeed batch.
 	// Zero means DefaultMaxAttempts.
 	MaxAttempts int
 	// RetryBackoff is the exponential backoff base (1s, 2s, 4s, ... capped
@@ -36,9 +39,10 @@ type OpenAIEmbedder struct {
 	MaxBackoff time.Duration
 }
 
-// Retry tuning defaults: a batch is retried for up to ~2 minutes of pure
-// backoff (1+2+4+8+16+30+30, plus any Retry-After waits), which is enough to
-// ride out typical API rate-limit windows instead of failing the whole add.
+// Retry tuning defaults: non-429 transient errors are retried for up to
+// ~2 minutes of pure backoff (1+2+4+8+16+30+30). 429 rate limits retry
+// forever — the backoff keeps growing but the attempt count never triggers
+// a give-up, so long rate-limit windows are waited out, not failed.
 const (
 	DefaultMaxAttempts  = 8
 	DefaultRetryBackoff = time.Second
@@ -149,42 +153,53 @@ func (e *OpenAIEmbedder) embedBatchWithRetry(ctx context.Context, texts []string
 		maxBackoff = DefaultMaxBackoff
 	}
 
-	var lastErr error
+	grow := func() {
+		backoff *= 2
+		if backoff > maxBackoff {
+			backoff = maxBackoff
+		}
+	}
 
-	for attempt := 1; attempt <= maxAttempts; attempt++ {
+	// attempt counts only non-429 retries; 429 loops forever.
+	for attempt := 1; ; attempt++ {
 		vecs, err := e.embedBatch(ctx, texts)
 		if err == nil {
 			return vecs, nil
 		}
-		lastErr = err
 
-		if !isRetryable(err) || attempt == maxAttempts {
+		var rlErr *rateLimitError
+		if errors.As(err, &rlErr) {
+			// Rate limited: always wait and retry, never give up. The
+			// server-advised Retry-After wins when it is longer than our
+			// own backoff, so a strict quota window is not re-hit.
+			wait := backoff
+			if rlErr.retryAfter > wait {
+				wait = rlErr.retryAfter
+			}
+			fmt.Fprintf(os.Stderr, "⚠ embedding API 限速（第 %d 次等待），%s 后重试…\n",
+				attempt, wait.Truncate(time.Millisecond))
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(wait):
+			}
+			grow()
+			continue
+		}
+
+		// Any other error: bounded retries, then give up.
+		if !isRetryable(err) || attempt >= maxAttempts {
 			return nil, err
 		}
-
-		// Wait server-advised seconds on 429, otherwise exponential backoff.
-		wait := backoff
-		var rlErr *rateLimitError
-		if errors.As(err, &rlErr) && rlErr.retryAfter > wait {
-			wait = rlErr.retryAfter
-		}
-		fmt.Fprintf(os.Stderr, "⚠ embedding API 限速 (%d/%d)，%s 后重试…\n",
-			attempt, maxAttempts, wait.Truncate(time.Millisecond))
-
+		fmt.Fprintf(os.Stderr, "⚠ embedding API 暂时不可用（%d/%d），%s 后重试…\n",
+			attempt, maxAttempts, backoff.Truncate(time.Millisecond))
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
-		case <-time.After(wait):
+		case <-time.After(backoff):
 		}
-		if wait < maxBackoff {
-			backoff *= 2
-			if backoff > maxBackoff {
-				backoff = maxBackoff
-			}
-		}
+		grow()
 	}
-
-	return nil, lastErr
 }
 
 // retryAfter parses an HTTP Retry-After seconds value ("120"); it returns 0

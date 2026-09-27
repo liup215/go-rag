@@ -60,20 +60,50 @@ func TestEmbedRetries429UntilSuccess(t *testing.T) {
 	}
 }
 
-func TestEmbedGivesUpAfterMaxAttemptsOn429(t *testing.T) {
-	srv := new429Then200Server(t, 100) // never succeeds
+func TestEmbedRetries429BeyondMaxAttempts(t *testing.T) {
+	// 429 must retry indefinitely: even with MaxAttempts far below the
+	// number of rate-limited responses, the batch still succeeds once the
+	// server recovers.
+	srv := new429Then200Server(t, 20)
 	defer srv.Close()
 
 	e := NewOpenAIEmbedder("k", srv.URL, "test-model")
-	e.MaxAttempts = 3
+	e.MaxAttempts = 3 // would give up after 3 attempts if 429 counted
+	e.RetryBackoff = time.Millisecond
+	e.MaxBackoff = 2 * time.Millisecond
+
+	vecs, err := e.Embed(context.Background(), []string{"hello"})
+	if err != nil {
+		t.Fatalf("Embed() error = %v, want success after 20 rate-limits", err)
+	}
+	if len(vecs) != 1 {
+		t.Errorf("vecs = %v", vecs)
+	}
+}
+
+func TestEmbedGivesUpAfterMaxAttemptsOn500(t *testing.T) {
+	// Non-429 transient errors keep the bounded-retry contract.
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`boom`))
+	}))
+	defer srv.Close()
+
+	e := NewOpenAIEmbedder("k", srv.URL, "test-model")
+	e.MaxAttempts = 2
 	e.RetryBackoff = time.Millisecond
 	e.MaxBackoff = 2 * time.Millisecond
 
 	_, err := e.Embed(context.Background(), []string{"hello"})
 	if err == nil {
-		t.Fatal("Embed() should exhaust retries against a permanent 429")
+		t.Fatal("Embed() should fail against a permanent 500")
 	}
-	if !strings.Contains(err.Error(), "429") {
-		t.Errorf("error should mention 429: %v", err)
+	if calls != 2 {
+		t.Errorf("server called %d times, want exactly maxAttempts=2", calls)
+	}
+	if !strings.Contains(err.Error(), "embeddings API 500") {
+		t.Errorf("error should mention 500: %v", err)
 	}
 }
