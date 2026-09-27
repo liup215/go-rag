@@ -1,6 +1,7 @@
 # Progress: go-rag
 
 ## What works
+- Config at `~/.go-rag/config.yml` (all platforms): easier to find than the old per-OS AppData/Library/.config paths. First Load after an upgrade copies the legacy `config.yaml` to the new location verbatim (old file kept as backup) with a stderr notice; `init` treats a legacy config as already-initialized. Covered by `pkg/config/config_test.go` (fresh path, defaults, migration bytes+values, dash-key migration behaviour). README/SKILL.md updated; user's live config migrated and `%APPDATA%\go-rag\` deleted; binary installed at `~/bin/go-rag.exe`.
 - Configuration initialization and management.
 - Document ingestion with chunking and embedding batching.
 - Keyword-only (BM25-only) ingestion: `add` no longer aborts when no embedding API key is configured. Parse + chunk run as usual, chunks are written with no embedding (SQL NULL) straight through `CreateChunks`, the document is marked `indexed`, and stdout announces the mode ("⚠ 未配置 embedding API key，已按关键词-only 模式索引（BM25），向量搜索不可用"). The duplicate-path guard and `--force` apply unchanged in this mode; `search` (which drops the embedder without a key) warns on stderr and retrieves those chunks with BM25.
@@ -35,6 +36,7 @@
 - Orphan-chunk fix (cascade delete + retrieval JOINs + `gc`) implemented; all tests pass, `go vet` clean, binary builds, and CLI behaviour was smoke-tested end to end against a seeded SQLite DB.
 
 ## Known issues
+- Hand-written config files with dash-style YAML keys (`api-key:`, `max-tokens:`) are silently ignored by `yaml.Unmarshal` against the underscore struct tags (`api_key`, `max_tokens`) — the 2026-09-27 "config wrong but works" incident root cause: go-rag degraded to keyword-only BM25 mode without any warning besides the mode notice. Migration preserves bytes verbatim, so dash keys stay ignored until `go-rag config set` rewrites them. Consider normalizing dash keys on, or after, migration.
 - Documents indexed in keyword-only mode (no embedding key) are invisible to vector search — re-index with `--force` after configuring `embedding.api-key` to give them embeddings.
 - `SQLiteStorage.SearchByKeyword` pre-filters with a single `LIKE '%<raw query>%'`, so multi-word Chinese queries ("机器学习 算法") return an empty candidate set before BM25 runs; the hybrid path (embedder configured) is unaffected because it loads all chunks.
 - Databases written before the foreign-key fix may still contain orphan chunks; `go-rag gc` cleans them (retrieval already hides them).

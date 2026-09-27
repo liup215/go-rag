@@ -2,6 +2,35 @@
 
 ## Current work focus
 
+Config path relocation to `~/.go-rag/config.yml`: the previous per-OS
+AppData/Library/.config locations were hard to find (2026-09-27 user request).
+`pkg/config/config.go` now has `ConfigDir()` = `~/.go-rag` (all platforms),
+`ConfigPath()` = `~/.go-rag/config.yml`, and an exported `LegacyConfigPath()`
+for the old per-OS location. `Load()` migrates lazily: if the new path is
+absent and the legacy file exists, it copies the legacy bytes verbatim to the
+new path (keeping the old file as backup) and prints an `ℹ 已将配置文件…迁移`
+notice on stderr; `Init()` treats a legacy config as "already initialized" so
+`init` cannot clobber a not-yet-migrated setup. `handleInit` mirrors that with
+a "legacy location" message. New `pkg/config/config_test.go` covers the fresh
+path, no-config defaults, migration (bytes preserved, legacy file untouched,
+values load), and dash-key migration behaviour (dash keys stay ignored — user
+must use `go-rag config set`, which writes proper underscores). Docs updated:
+README config paths + example header; SKILL.md Windows install now targets
+`~/bin` instead of `%LOCALAPPDATA%\Programs\go-rag`. The user's real setup was
+migrated live (`~/.go-rag/config.yml` holds the ARK embedding key) and the old
+`%APPDATA%\go-rag\` directory was deleted. Installed binary lives at
+`~/bin/go-rag.exe` (rebuilt after this change); no env-var config overrides
+exist and none were requested.
+
+Also this round (discovered diagnosis): the user's hand-written legacy config
+used dash-style keys (`api-key:`, `max-tokens:`) that `yaml.Unmarshal`
+silently ignored against the underscore tags (`api_key`, `max_tokens`) — the
+embedding key was never loading, so go-rag silently ran keyword-only (BM25)
+mode. This was the root cause of "config seems wrong but go-rag works".
+Watch for the same gap when reviewing user config files.
+
+## Previous round (keyword-only ingestion)
+
 Keyword-only ingestion (BM25-only mode): `go-rag add` no longer exits 1 when
 `cfg.Embedding.APIKey` is empty. Parse + chunk run as usual, the embedding
 worker pipeline is skipped, and `indexKeywordOnly(store, docID, chunks)` writes
@@ -25,7 +54,7 @@ Verified end to end with the built binary: no-key add → indexed + notice; repe
 add → duplicate skip; search → BM25 hit + stderr notice; with a key and a dead
 endpoint the original worker path still runs and cleans up.
 
-## Previous round (delete status fix + storage hardening)
+## Previous round (delete status fix + storage hardening, now two rounds back)
 
 Orphan-chunk fix: `delete` now removes a document and all of its chunks in one
 transaction, every retrieval query joins `documents` so orphaned chunks can

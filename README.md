@@ -38,9 +38,11 @@ go-rag init
 ```
 
 This creates a config file at:
-- Windows: `%APPDATA%\go-rag\config.yaml`
-- macOS: `~/Library/Application Support/go-rag/config.yaml`
-- Linux: `~/.config/go-rag/config.yaml`
+- All platforms: `~/.go-rag/config.yml`
+
+(Existing configs at the old per-OS locations — `%APPDATA%\go-rag\config.yaml`,
+`~/Library/Application Support/go-rag/config.yaml`, `~/.config/go-rag/config.yaml` —
+are migrated automatically on the next command.)
 
 ### 2. Configure embedding service
 
@@ -279,7 +281,7 @@ go-rag wiki index-delete <index-id>
 ## Configuration
 
 ```yaml
-# config.yaml
+# ~/.go-rag/config.yml
 embedding:
   url: "https://api.openai.com/v1"
   api_key: "sk-..."

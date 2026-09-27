@@ -102,35 +102,63 @@ func defaultStoragePath() string {
 	}
 }
 
-// ConfigDir returns the configuration directory
-func ConfigDir() string {
-	homeDir, err := os.UserHomeDir()
+// homeDir returns the user home directory, falling back to "."
+func homeDir() string {
+	home, err := os.UserHomeDir()
 	if err != nil {
-		homeDir = "."
+		return "."
 	}
-
-	switch runtime.GOOS {
-	case "windows":
-		return filepath.Join(homeDir, "AppData", "Roaming", "go-rag")
-	case "darwin":
-		return filepath.Join(homeDir, "Library", "Application Support", "go-rag")
-	default: // linux and others
-		return filepath.Join(homeDir, ".config", "go-rag")
-	}
+	return home
 }
 
-// ConfigPath returns the full path to the config file
+// ConfigDir returns the configuration directory: ~/.go-rag
+func ConfigDir() string {
+	return filepath.Join(homeDir(), ".go-rag")
+}
+
+// ConfigPath returns the full path to the config file:
+// ~/.go-rag/config.yml
 func ConfigPath() string {
-	return filepath.Join(ConfigDir(), "config.yaml")
+	return filepath.Join(ConfigDir(), "config.yml")
+}
+
+// LegacyConfigPath is the pre-0.4 config location (the per-OS AppData/
+// Library/.config directory). It is only used to migrate existing
+// configurations to the new location.
+func LegacyConfigPath() string {
+	switch runtime.GOOS {
+	case "windows":
+		return filepath.Join(homeDir(), "AppData", "Roaming", "go-rag", "config.yaml")
+	case "darwin":
+		return filepath.Join(homeDir(), "Library", "Application Support", "go-rag", "config.yaml")
+	default: // linux and others
+		return filepath.Join(homeDir(), ".config", "go-rag", "config.yaml")
+	}
 }
 
 // Load loads configuration from file
 func Load() (*Config, error) {
 	configPath := ConfigPath()
 
-	// If config file doesn't exist, return default
+	// If the config file doesn't exist but a legacy one does, migrate it
+	// (copy) to the new location before loading, so this is a one-time move.
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
-		return DefaultConfig(), nil
+		legacyPath := LegacyConfigPath()
+		if _, lerr := os.Stat(legacyPath); lerr == nil {
+			data, rerr := os.ReadFile(legacyPath)
+			if rerr != nil {
+				return nil, fmt.Errorf("failed to read legacy config file %s: %w", legacyPath, rerr)
+			}
+			if werr := os.MkdirAll(ConfigDir(), 0o755); werr != nil {
+				return nil, fmt.Errorf("failed to create config directory: %w", werr)
+			}
+			if werr := os.WriteFile(configPath, data, 0o644); werr != nil {
+				return nil, fmt.Errorf("failed to write config file: %w", werr)
+			}
+			fmt.Fprintf(os.Stderr, "ℹ 已将配置文件从 %s 迁移到 %s（原文件保留为备份）\n", legacyPath, configPath)
+		} else {
+			return DefaultConfig(), nil
+		}
 	}
 
 	data, err := os.ReadFile(configPath)
@@ -169,7 +197,12 @@ func (c *Config) Save() error {
 // Init initializes a new configuration file. If the config file already
 // exists, it returns nil without modifying the existing configuration.
 func Init() error {
+	// A legacy config counts as "already initialized": it will be migrated
+	// to the new location on the next Load.
 	if _, err := os.Stat(ConfigPath()); err == nil {
+		return nil
+	}
+	if _, err := os.Stat(LegacyConfigPath()); err == nil {
 		return nil
 	}
 	config := DefaultConfig()

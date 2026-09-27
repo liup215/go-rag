@@ -171,6 +171,13 @@ func handleInit() {
 		fmt.Printf("Config file: %s\n", configPath)
 		return
 	}
+	// A legacy config counts as initialized too; the next command migrates it.
+	if _, err := os.Stat(config.LegacyConfigPath()); err == nil {
+		fmt.Println("Configuration already initialized (legacy location).")
+		fmt.Printf("Previous config file: %s\n", config.LegacyConfigPath())
+		fmt.Println("It will be migrated to " + configPath + " on the next command that loads the config.")
+		return
+	}
 
 	if err := config.Init(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)

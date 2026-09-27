@@ -57,12 +57,12 @@ Invoke-WebRequest -Uri "https://github.com/liup215/go-rag/releases/latest/downlo
 sudo mv go-rag /usr/local/bin/
 
 # Windows (PowerShell)
-# Create directory and move binary
-New-Item -ItemType Directory -Path "$env:LOCALAPPDATA\Programs\go-rag" -Force
-Move-Item go-rag.exe "$env:LOCALAPPDATA\Programs\go-rag\"
+# Move binary to ~/bin (single-binary layout)
+New-Item -ItemType Directory -Path "$env:USERPROFILE\bin" -Force
+Move-Item go-rag.exe "$env:USERPROFILE\bin\"
 
 # Add to PATH (if not already added)
-[Environment]::SetEnvironmentVariable("Path", $env:Path + ";$env:LOCALAPPDATA\Programs\go-rag", "User")
+[Environment]::SetEnvironmentVariable("Path", $env:Path + ";$env:USERPROFILE\bin", "User")
 ```
 
 ### Step 3: Initialize

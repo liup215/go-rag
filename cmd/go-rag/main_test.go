@@ -671,7 +671,7 @@ func TestMain(m *testing.M) {
 }
 
 // newKeywordOnlyTestEnv points HOME/USERPROFILE at an isolated directory and
-// writes a config.yaml there with an empty embedding API key and a throwaway
+// writes a config.yml there with an empty embedding API key and a throwaway
 // storage path, so CLI subprocesses see exactly the "no embedding key" setup.
 // It returns the storage path the CLI was pointed at.
 func newKeywordOnlyTestEnv(t *testing.T) string {
@@ -692,7 +692,7 @@ func newKeywordOnlyTestEnv(t *testing.T) string {
 		"  model: text-embedding-3-small\n" +
 		"storage:\n" +
 		"  path: " + filepath.ToSlash(dbPath) + "\n"
-	if err := os.WriteFile(filepath.Join(cfgDir, "config.yaml"), []byte(cfgYAML), 0o644); err != nil {
+	if err := os.WriteFile(config.ConfigPath(), []byte(cfgYAML), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
 	return dbPath
