@@ -136,6 +136,7 @@ go-rag search "machine learning concepts"
 go-rag search "project requirements" --top-k 10
 
 # Higher similarity threshold
+# (lower it for cross-lingual queries — see Tips #5/#6)
 go-rag search "budget analysis" --threshold 0.7
 
 # Machine-readable output (preferred for agents and scripts)
@@ -390,6 +391,10 @@ go-rag gc             # delete them
 3. **API costs**: Embedding costs are based on token count. Monitor your usage when indexing large documents.
 
 4. **Local models**: Ollama provides free local embeddings but requires running the server locally.
+
+5. **Cross-lingual queries — mix English keywords in (Chinese queries on English corpora)**: When the indexed corpus is English-language (e.g. English textbooks), queries containing English terms are the most reliable. Pure-Chinese queries against an English corpus are unstable — cross-lingual vector similarity runs low (the same question asked as `enzyme competitive inhibitor` can score 0.98 while its pure-Chinese phrasing returns nothing at all). Rule of thumb: keep the Chinese intent but append the English terminology.
+
+6. **Threshold for pure-Chinese queries**: cross-lingual query–chunk cosine similarity often sits at 0.3–0.5, below the default `--threshold 0.5`, and BM25 contributes nothing (no Chinese tokens in an English corpus) — so a good answer can be filtered out entirely. If a pure-Chinese query returns nothing, retry with `--threshold 0.3` (or even `0`) — the reranker (when enabled) re-scores anyway, so lowering the recall gate rarely hurts precision.
 
 ## Resources
 
