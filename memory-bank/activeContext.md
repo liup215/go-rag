@@ -2,25 +2,36 @@
 
 ## Current work focus
 
-Config path relocation to `~/.go-rag/config.yml`: the previous per-OS
-AppData/Library/.config locations were hard to find (2026-09-27 user request).
-`pkg/config/config.go` now has `ConfigDir()` = `~/.go-rag` (all platforms),
-`ConfigPath()` = `~/.go-rag/config.yml`, and an exported `LegacyConfigPath()`
-for the old per-OS location. `Load()` migrates lazily: if the new path is
-absent and the legacy file exists, it copies the legacy bytes verbatim to the
-new path (keeping the old file as backup) and prints an `ℹ 已将配置文件…迁移`
-notice on stderr; `Init()` treats a legacy config as "already initialized" so
-`init` cannot clobber a not-yet-migrated setup. `handleInit` mirrors that with
-a "legacy location" message. New `pkg/config/config_test.go` covers the fresh
-path, no-config defaults, migration (bytes preserved, legacy file untouched,
-values load), and dash-key migration behaviour (dash keys stay ignored — user
-must use `go-rag config set`, which writes proper underscores). Docs updated:
-README config paths + example header; SKILL.md Windows install now targets
-`~/bin` instead of `%LOCALAPPDATA%\Programs\go-rag`. The user's real setup was
-migrated live (`~/.go-rag/config.yml` holds the ARK embedding key) and the old
-`%APPDATA%\go-rag\` directory was deleted. Installed binary lives at
-`~/bin/go-rag.exe` (rebuilt after this change); no env-var config overrides
-exist and none were requested.
+Embedding URL join fix + version ldflags injection + `embedding.max-batch`
+(2026-09-28, released as **v0.5.2**, commit 173cd0f):
+
+1. **URL join** (`internal/embedder/openai.go`): the else-branch from d1493f8
+   (Jul 7) appended `/v1/embeddings` to any base lacking `/v1` — silently
+   breaking all version-style bases like Ark `/api/plan/v3` (404 on every
+   call). Symptoms: `add` failed with "embeddings API 404"; `search` fell back
+   to BM25 **silently** (no notice). Root cause of the user's live breakage:
+   they swapped to a freshly-built exe on Sep 27; all searches since then ran
+   keyword-only (verified: all pre-Sep-27 chunks have vectors, post-Sep-27
+   adds failed). New rules: trim trailing slash first; base ending in `/v1`
+   → `+/embeddings`; base ending in `/v2../vN` → `+/embeddings` (new
+   `hasVersionSuffix`); base containing `/v1/` → `+/embeddings`; otherwise
+   `+/v1/embeddings`. Covered by `TestEmbedURLJoin` (7 shapes, path-echo
+   httptest).
+2. **Version injection**: release.yml already ran `-ldflags "-X
+   main.version=${tag}"` but `version` was a `const` — `-X` only works on
+   vars, so every release binary printed the hardcoded v0.4.0. Changed to
+   `var version = "dev"`. Verified: official v0.5.2 asset prints `v0.5.2`.
+3. **`embedding.max-batch`** (new config): caps texts per `/embeddings`
+   request. Once 404 was fixed, Ark surfaced its second limit —
+   `doubao-embedding-vision` accepts max 10 inputs per request while go-rag
+   batches up to 100 → 400 InvalidParameter, retried 3× pointlessly. Default
+   100; README of the student toolkit now sets 10. Wired through
+   `newEmbedderFromConfig` (Set/Get/GetDisplay/help metadata).
+
+Deployment state: `~/bin/go-rag.exe` rebuilt at v0.5.2; the three binaries in
+the AP-class student toolkit (go-rag.exe / darwin-arm64 / darwin-amd64) are
+local builds of 173cd0f at v0.5.2. CED doc re-indexed into the user's live KB
+(203 chunks, doc 12e87d61). Teacher KB config now includes max-batch=10.
 
 Also this round (discovered diagnosis): the user's hand-written legacy config
 used dash-style keys (`api-key:`, `max-tokens:`) that `yaml.Unmarshal`

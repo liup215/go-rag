@@ -1,6 +1,7 @@
 # Progress: go-rag
 
 ## What works
+- **v0.5.2 (2026-09-28)**: embedding URL join handles version-style bases (`/api/plan/v3` → `+/embeddings`, not `/v1/embeddings`); `embedding.max-batch` caps inputs per request (Ark doubao-embedding-vision = 10); `--version` reports the real release tag (`version` is now a var, injected via `-ldflags -X`). CI-built official assets verified printing `v0.5.2`.
 - Config at `~/.go-rag/config.yml` (all platforms): easier to find than the old per-OS AppData/Library/.config paths. First Load after an upgrade copies the legacy `config.yaml` to the new location verbatim (old file kept as backup) with a stderr notice; `init` treats a legacy config as already-initialized. Covered by `pkg/config/config_test.go` (fresh path, defaults, migration bytes+values, dash-key migration behaviour). README/SKILL.md updated; user's live config migrated and `%APPDATA%\go-rag\` deleted; binary installed at `~/bin/go-rag.exe`.
 - Configuration initialization and management.
 - Document ingestion with chunking and embedding batching.
@@ -43,6 +44,8 @@
 - gopdf v0.9.5 lexer bug (worked around, not fixed upstream): `readKeyword` returns an empty keyword *without advancing* for the delimiters `NextToken` does not handle (`)`, `{`, `}`), so `ExtractPageText` spins forever on content it cannot tokenize (e.g. ciphertext of an encrypted stream). `readablePageContent` in `internal/parser/pdf.go` pre-scans each page with gopdf's own lexer and skips pages that hit it; worth reporting upstream.
 
 ## Recent fixes
+- Embedding URL join (d1493f8 regression, silently broke all non-`/v1` bases since Jul 7 — visible only after the user swapped binaries on Sep 27): version-style bases (`.../v2../vN`) now append `/embeddings` directly; trailing slash trimmed first; covered by `TestEmbedURLJoin`.
+- `embedding.max-batch` (new config key): some providers cap inputs per request (Ark doubao-embedding-vision: 10); oversized batches surfaced as 400 InvalidParameter and were pointlessly retried 3× by the add layer.
 - `add` without an embedding API key used to exit 1 ("Error: embedding API key not configured"), making the tool unusable as a pure keyword index. It now degrades: parse/chunk unchanged, the embedding worker pipeline is skipped, chunks are written with a NULL embedding via `indexKeywordOnly` (status becomes `indexed`, stdout announces keyword-only mode), and a failed batch write still cleans the document up. `handleSearch` prints a keyword-only notice on stderr (stdout stays JSON-clean). Covered by `TestIndexKeywordOnly`, `TestIndexKeywordOnlyFailure`, `TestAddWithoutEmbeddingKeyIndexesKeywordOnly` (subprocess e2e: NULL embeddings + `indexed` status + duplicate guard) and `TestSearchKeywordOnlyNotice`; the test binary now re-runs itself as the CLI via `GO_RAG_TEST_RUN_MAIN` in `TestMain`.
 - PDFs whose content gopdf cannot decode no longer hang the parser (`readablePageContent` guard, empty-keyword detection) and are skipped per page; when gopdf fails on structure or garbage, pdfcpu gets a second opinion before "no text extracted" is reported.
 
