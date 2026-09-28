@@ -225,10 +225,15 @@ func (e *OpenAIEmbedder) embedBatch(ctx context.Context, texts []string) ([][]fl
 	}
 
 	url := e.BaseURL
+	url = strings.TrimSuffix(url, "/")
 	// If URL already ends with /embeddings, use it as-is (user provided full path)
 	if hasSuffix(url, "/embeddings") {
 		// Use as-is
 	} else if hasSuffix(url, "/v1") {
+		url += "/embeddings"
+	} else if hasVersionSuffix(url) {
+		// Base URL already carries a version segment (e.g. Ark style
+		// "https://ark.cn-beijing.volces.com/api/plan/v3"); just append the endpoint.
 		url += "/embeddings"
 	} else if contains(url, "/v1/") {
 		// URL contains /v1/ somewhere, assume it's a custom path
@@ -426,4 +431,20 @@ func containsSubstr(s, substr string) bool {
 
 func hasSuffix(s, suffix string) bool {
 	return len(s) >= len(suffix) && s[len(s)-len(suffix):] == suffix
+}
+
+// hasVersionSuffix reports whether the URL path ends with a versioned API
+// segment such as /v1, /v2, /v3 ... (e.g. Volcano Ark ".../api/plan/v3",
+// DeepSeek ".../api/v3"). These bases expect the endpoint appended directly
+// instead of the OpenAI-style "/v1/embeddings" path.
+func hasVersionSuffix(url string) bool {
+	if i := strings.LastIndex(url, "/v"); i >= 0 {
+		for _, c := range url[i+2:] {
+			if c < '0' || c > '9' {
+				return false
+			}
+		}
+		return len(url) > i+2
+	}
+	return false
 }

@@ -9,6 +9,37 @@ import (
 	"time"
 )
 
+// TestEmbedURLJoin：base URL → 请求路径的拼接规则。
+func TestEmbedURLJoin(t *testing.T) {
+	cases := []struct {
+		suffix string // 拼在 echo 服务器地址后的 base 后缀
+		want   string // 期望的请求路径
+	}{
+		{"", "/v1/embeddings"},                          // 无版本段 → OpenAI 兼容默认
+		{"/v1", "/v1/embeddings"},                       // OpenAI 标准风格
+		{"/v1/", "/v1/embeddings"},                      // 尾随斜杠被裁掉
+		{"/api/v1/custom", "/api/v1/custom/embeddings"}, // 含 /v1/ 自定义路径
+		{"/api/plan/v3", "/api/plan/v3/embeddings"},     // Ark 风格 /vN 结尾
+		{"/api/v2", "/api/v2/embeddings"},               // 其他 /vN
+		{"/embeddings", "/embeddings"},                  // 完整路径原样使用
+	}
+	var got string
+	for _, c := range cases {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			got = r.URL.Path
+			_, _ = w.Write([]byte(`{"data":[{"embedding":[0.1],"index":0}]}`))
+		}))
+		e := NewOpenAIEmbedder("k", srv.URL+c.suffix, "m")
+		if _, err := e.Embed(context.Background(), []string{"x"}); err != nil {
+			t.Errorf("base %q: Embed() error = %v", srv.URL+c.suffix, err)
+		}
+		if got != c.want {
+			t.Errorf("base %q: got path %s, want %s", srv.URL+c.suffix, got, c.want)
+		}
+		srv.Close()
+	}
+}
+
 func TestRetryAfterParsing(t *testing.T) {
 	cases := []struct {
 		in   string

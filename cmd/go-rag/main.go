@@ -25,7 +25,10 @@ import (
 	"github.com/liup215/go-rag/pkg/config"
 )
 
-const version = "v0.4.0"
+// version is the Go binary version, injected at build time via
+// -ldflags "-X main.version=<tag>" (see .github/workflows/release.yml and build.yml).
+// It must remain a var: -X cannot override a const. Default is "dev".
+var version = "dev"
 
 // booleanFlags names flags that take no value. reorderArgs must not treat the
 // token after them as the flag's value, so "go-rag search --json <query>"
@@ -33,6 +36,16 @@ const version = "v0.4.0"
 var booleanFlags = map[string]bool{
 	"json":    true,
 	"dry-run": true,
+}
+
+// newEmbedderFromConfig builds the OpenAI-compatible embedder from config,
+// applying the optional per-request batch cap (embedding.max-batch).
+func newEmbedderFromConfig(cfg *config.Config) embedder.Embedder {
+	emb := embedder.NewOpenAIEmbedder(cfg.Embedding.APIKey, cfg.Embedding.URL, cfg.Embedding.Model)
+	if cfg.Embedding.MaxBatch > 0 {
+		emb.MaxBatch = cfg.Embedding.MaxBatch
+	}
+	return emb
 }
 
 // reorderArgs moves flags (and their values) before positional arguments.
@@ -342,7 +355,7 @@ func handleAdd() {
 	failedBatches := int32(0)
 
 	ctx := context.Background()
-	emb := embedder.NewOpenAIEmbedder(cfg.Embedding.APIKey, cfg.Embedding.URL, cfg.Embedding.Model)
+	emb := newEmbedderFromConfig(cfg)
 
 	// Calculate batch size
 	batchSize := emb.MaxBatchSize()
@@ -612,7 +625,7 @@ func handleSearch() {
 	// Initialize embedder if API key is available
 	var emb embedder.Embedder
 	if cfg.Embedding.APIKey != "" {
-		emb = embedder.NewOpenAIEmbedder(cfg.Embedding.APIKey, cfg.Embedding.URL, cfg.Embedding.Model)
+		emb = newEmbedderFromConfig(cfg)
 	} else {
 		// The retriever runs BM25-only without an embedder. This notice goes to
 		// stderr so `--json` output on stdout stays machine-readable.

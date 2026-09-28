@@ -21,9 +21,14 @@ type Config struct {
 
 // EmbeddingConfig holds embedding service configuration
 type EmbeddingConfig struct {
-	URL    string `yaml:"url"`
-	APIKey string `yaml:"api_key"`
-	Model  string `yaml:"model"`
+	URL     string `yaml:"url"`
+	APIKey  string `yaml:"api_key"`
+	Model   string `yaml:"model"`
+	// MaxBatch caps how many texts are sent in one /embeddings request.
+	// 0 means the provider default (100 for OpenAI-compatible APIs).
+	// Some providers accept far fewer (e.g. Ark doubao-embedding-vision
+	// accepts at most 10); set this to the provider's documented limit.
+	MaxBatch int `yaml:"max_batch"`
 }
 
 // ChunkingConfig holds text chunking configuration
@@ -218,6 +223,8 @@ func (c *Config) Set(key, value string) error {
 		c.Embedding.APIKey = value
 	case "embedding.model":
 		c.Embedding.Model = value
+	case "embedding.max-batch":
+		c.Embedding.MaxBatch = parseInt(value, 100)
 	case "chunking.max-tokens":
 		// Parse and validate
 		c.Chunking.MaxTokens = parseInt(value, 512)
@@ -270,6 +277,8 @@ func (c *Config) Get(key string) (string, error) {
 		return c.Embedding.APIKey, nil
 	case "embedding.model":
 		return c.Embedding.Model, nil
+	case "embedding.max-batch":
+		return fmt.Sprintf("%d", c.Embedding.MaxBatch), nil
 	case "chunking.max-tokens":
 		return fmt.Sprintf("%d", c.Chunking.MaxTokens), nil
 	case "chunking.overlap":
@@ -351,6 +360,8 @@ func (c *Config) GetDisplay(key string) (string, error) {
 		return maskSecret(c.Embedding.APIKey), nil
 	case "embedding.model":
 		return c.Embedding.Model, nil
+	case "embedding.max-batch":
+		return fmt.Sprintf("%d", c.Embedding.MaxBatch), nil
 	case "chunking.max-tokens":
 		return fmt.Sprintf("%d", c.Chunking.MaxTokens), nil
 	case "chunking.overlap":
@@ -429,6 +440,13 @@ func GetConfigItems() []ConfigItem {
 			Key:         "embedding.model",
 			Description: "Embedding model name (e.g., text-embedding-3-small, nomic-embed-text)",
 			Default:     "text-embedding-3-small",
+			Required:    false,
+			Category:    "embedding",
+		},
+		{
+			Key:         "embedding.max-batch",
+			Description: "Max texts per /embeddings request (provider-dependent; Ark doubao-embedding-vision = 10; 0/100 = provider default)",
+			Default:     "100",
 			Required:    false,
 			Category:    "embedding",
 		},
