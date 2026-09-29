@@ -99,6 +99,26 @@ go-rag config set embedding.api-key your-dashscope-key
 go-rag config set embedding.model text-embedding-v3
 ```
 
+### Option 4: SiliconFlow (free embedding + rerank, one key for both)
+
+```bash
+go-rag config set embedding.url https://api.siliconflow.cn/v1
+go-rag config set embedding.api-key <your-siliconflow-key>
+go-rag config set embedding.model BAAI/bge-m3
+
+# Recommended: rerank with the same key (endpoint matches go-rag's expected format)
+go-rag config set reranker.enabled true
+go-rag config set reranker.url https://api.siliconflow.cn/v1/rerank
+go-rag config set reranker.api-key <your-siliconflow-key>
+go-rag config set reranker.model BAAI/bge-reranker-v2-m3
+```
+
+`BAAI/bge-m3` and `BAAI/bge-reranker-v2-m3` are free (rate-limited) on
+SiliconFlow, multilingual, and well suited to Chinese–English mixed queries
+over English corpora. Register at <https://siliconflow.cn>; the same key can
+also be used as an OpenCode chat-model provider. If you configure the
+reranker here, the user does not need to enable it separately.
+
 ## Usage
 
 ### Index Documents
